@@ -1,0 +1,65 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+model Instance {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  status    String   @default("DISCONNECTED")
+  qrCode    String?
+  updatedAt DateTime @updatedAt
+}
+
+model Broadcast {
+  id                String    @id @default(cuid())
+  name              String
+  message           String
+  status            String    @default("PENDING") // PENDING, RUNNING, COMPLETED, FAILED, PAUSED_RATE_LIMIT, PAUSED_WORKING_HOURS
+  total             Int       @default(0)
+  sent              Int       @default(0)
+  failed            Int       @default(0)
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+  delayMin          Int       @default(10)
+  delayMax          Int       @default(60)
+  dailyLimit        Int       @default(0)      // 0 = no limit
+  workingHourStart  Int       @default(5)      // 05:00 (Human Clock: awake)
+  workingHourEnd    Int       @default(23)     // 23:00 (Human Clock: sleep 23–05)
+  messages          Message[]
+  logs              BroadcastLog[]
+}
+
+model Message {
+  id              String    @id @default(cuid())
+  broadcastId     String
+  recipient       String
+  content         String?   // Actual randomized message sent (for audit)
+  antiBannedMeta  Json?     // { delay, spintax, suffix, typingDuration, batchIndex }
+  status          String    @default("PENDING") // PENDING, SENT, FAILED
+  error           String?
+  sentAt          DateTime?
+  broadcast       Broadcast @relation(fields: [broadcastId], references: [id])
+}
+
+model BroadcastLog {
+  id          String    @id @default(cuid())
+  broadcastId String
+  action      String    // TYPING, COOLDOWN, SPINTAX, UNIQUE_SUFFIX, RATE_LIMIT_PAUSE, SESSION_VALIDATE, WORKING_HOURS_PAUSE
+  detail      String?   // Human-readable detail
+  createdAt   DateTime  @default(now())
+  broadcast   Broadcast @relation(fields: [broadcastId], references: [id])
+}
+
+model Template {
+  id        String   @id @default(cuid())
+  userId    String?
+  title     String
+  content   String
+  createdAt DateTime @default(now())
+}
