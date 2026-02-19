@@ -13,6 +13,22 @@ const prisma = new PrismaClient();
 const WORKER_INSTANCE_NAME = 'default-worker';
 const MEMORY_LIMIT_MB = 1024;
 
+// Resolve owner userId for this worker instance
+let cachedWorkerId: string | null = null;
+async function getWorkerUserId(): Promise<string> {
+    if (cachedWorkerId) return cachedWorkerId;
+    // Try env var first, then fallback to first user in DB
+    if (process.env.WORKER_USER_ID) {
+        cachedWorkerId = process.env.WORKER_USER_ID;
+        return cachedWorkerId;
+    }
+    const firstUser = await prisma.user.findFirst({ select: { id: true } });
+    if (!firstUser) throw new Error('No users found in database. Create a user first.');
+    const userId = firstUser.id;
+    cachedWorkerId = userId;
+    return userId;
+}
+
 // Global Socket Reference
 let globalSock: any = null;
 
@@ -369,10 +385,11 @@ async function connectToWhatsApp() {
         if (qr) {
             console.log('QR Code generated');
             try {
+                const ownerId = await getWorkerUserId();
                 await prisma.instance.upsert({
                     where: { name: WORKER_INSTANCE_NAME },
                     update: { status: 'QR_READY', qrCode: qr },
-                    create: { name: WORKER_INSTANCE_NAME, status: 'QR_READY', qrCode: qr },
+                    create: { name: WORKER_INSTANCE_NAME, status: 'QR_READY', qrCode: qr, userId: ownerId },
                 });
             } catch (error) {
                 console.error('Failed to save QR code to DB:', error);
@@ -436,10 +453,11 @@ async function connectToWhatsApp() {
             // Start the presence heartbeat for active user simulation
             startPresenceHeartbeat();
 
+            const ownerId = await getWorkerUserId();
             await prisma.instance.upsert({
                 where: { name: WORKER_INSTANCE_NAME },
                 update: { status: 'CONNECTED', qrCode: '' },
-                create: { name: WORKER_INSTANCE_NAME, status: 'CONNECTED', qrCode: '' },
+                create: { name: WORKER_INSTANCE_NAME, status: 'CONNECTED', qrCode: '', userId: ownerId },
             });
         }
     });
