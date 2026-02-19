@@ -353,7 +353,7 @@ async function connectToWhatsApp() {
 
     const sock = makeWASocket({
         auth: state,
-        printQRInTerminal: true,
+
         logger: pino({ level: 'silent' }) as any,
         browser: Browsers.macOS('Desktop'),
         syncFullHistory: false,
@@ -368,11 +368,15 @@ async function connectToWhatsApp() {
 
         if (qr) {
             console.log('QR Code generated');
-            await prisma.instance.upsert({
-                where: { name: WORKER_INSTANCE_NAME },
-                update: { status: 'QR_READY', qrCode: qr },
-                create: { name: WORKER_INSTANCE_NAME, status: 'QR_READY', qrCode: qr },
-            });
+            try {
+                await prisma.instance.upsert({
+                    where: { name: WORKER_INSTANCE_NAME },
+                    update: { status: 'QR_READY', qrCode: qr },
+                    create: { name: WORKER_INSTANCE_NAME, status: 'QR_READY', qrCode: qr },
+                });
+            } catch (error) {
+                console.error('Failed to save QR code to DB:', error);
+            }
         }
 
         if (connection === 'close') {
@@ -384,10 +388,14 @@ async function connectToWhatsApp() {
             // Cleanup the dead socket properly
             await cleanupSocket(`connection_close_${statusCode}`);
 
-            await prisma.instance.update({
-                where: { name: WORKER_INSTANCE_NAME },
-                data: { status: 'DISCONNECTED', qrCode: null },
-            });
+            try {
+                await prisma.instance.update({
+                    where: { name: WORKER_INSTANCE_NAME },
+                    data: { status: 'DISCONNECTED', qrCode: null },
+                });
+            } catch (error) {
+                console.error('Failed to update instance status (DISCONNECTED):', error);
+            }
 
             // Detect rate-limit disconnect → halt all broadcasts
             if (isRateLimitError(lastDisconnect?.error)) {
