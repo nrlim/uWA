@@ -320,7 +320,7 @@ async function gracefulShutdown(signal: string): Promise<void> {
     try {
         await prisma.instance.update({
             where: { name: WORKER_INSTANCE_NAME },
-            data: { status: 'DISCONNECTED', qrCode: null },
+            data: { status: 'DISCONNECTED', qrCode: '' },
         });
     } catch { /* DB might be gone already */ }
 
@@ -381,7 +381,19 @@ async function connectToWhatsApp() {
 
         if (connection === 'close') {
             const statusCode = (lastDisconnect?.error as Boom)?.output?.statusCode;
-            const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+            let shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+
+            // Start a new session if logged out
+            if (statusCode === DisconnectReason.loggedOut) {
+                console.log('Session logged out (Code 401). Clearing auth to generate new QR...');
+                const fs = await import('fs');
+                const path = await import('path');
+                const authDir = path.join(process.cwd(), 'auth_info_baileys');
+                if (fs.existsSync(authDir)) {
+                    fs.rmSync(authDir, { recursive: true, force: true });
+                }
+                shouldReconnect = true;
+            }
 
             console.log(`Connection closed (code: ${statusCode}), reconnecting: ${shouldReconnect}`);
 
@@ -391,7 +403,7 @@ async function connectToWhatsApp() {
             try {
                 await prisma.instance.update({
                     where: { name: WORKER_INSTANCE_NAME },
-                    data: { status: 'DISCONNECTED', qrCode: null },
+                    data: { status: 'DISCONNECTED', qrCode: '' },
                 });
             } catch (error) {
                 console.error('Failed to update instance status (DISCONNECTED):', error);
@@ -426,8 +438,8 @@ async function connectToWhatsApp() {
 
             await prisma.instance.upsert({
                 where: { name: WORKER_INSTANCE_NAME },
-                update: { status: 'CONNECTED', qrCode: null },
-                create: { name: WORKER_INSTANCE_NAME, status: 'CONNECTED', qrCode: null },
+                update: { status: 'CONNECTED', qrCode: '' },
+                create: { name: WORKER_INSTANCE_NAME, status: 'CONNECTED', qrCode: '' },
             });
         }
     });
@@ -883,7 +895,7 @@ function startDisconnectWatcher(): void {
                 // Update DB status
                 await prisma.instance.update({
                     where: { name: WORKER_INSTANCE_NAME },
-                    data: { status: 'DISCONNECTED', qrCode: null },
+                    data: { status: 'DISCONNECTED', qrCode: '' },
                 });
 
                 console.log('[DISCONNECT] Disconnected successfully. Restarting for new QR...');
