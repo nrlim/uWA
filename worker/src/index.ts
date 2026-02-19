@@ -389,7 +389,7 @@ async function connectToWhatsApp() {
                 await prisma.instance.upsert({
                     where: { name: WORKER_INSTANCE_NAME },
                     update: { status: 'QR_READY', qrCode: qr },
-                    create: { name: WORKER_INSTANCE_NAME, status: 'QR_READY', qrCode: qr, userId: ownerId },
+                    create: { name: WORKER_INSTANCE_NAME, status: 'QR_READY', qrCode: qr, user: { connect: { id: ownerId } } },
                 });
             } catch (error) {
                 console.error('Failed to save QR code to DB:', error);
@@ -457,7 +457,7 @@ async function connectToWhatsApp() {
             await prisma.instance.upsert({
                 where: { name: WORKER_INSTANCE_NAME },
                 update: { status: 'CONNECTED', qrCode: '' },
-                create: { name: WORKER_INSTANCE_NAME, status: 'CONNECTED', qrCode: '', userId: ownerId },
+                create: { name: WORKER_INSTANCE_NAME, status: 'CONNECTED', qrCode: '', user: { connect: { id: ownerId } } },
             });
         }
     });
