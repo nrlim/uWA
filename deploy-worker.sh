@@ -17,18 +17,29 @@ echo "📥 [1/6] Menarik kode terbaru dari repository..."
 #git reset --hard HEAD
 git pull origin main || { echo "❌ Git pull gagal"; exit 1; }
 
-# 2. Masuk ke direktori worker
+# 2. Stop PM2 worker dulu agar tidak pakai file lama
+echo ""
+echo "⏹️  [2/7] Menghentikan worker lama..."
+pm2 stop $PROJECT_NAME 2>/dev/null || true
+
+# 3. Masuk ke direktori worker
 cd $WORKER_DIR || { echo "❌ Folder $WORKER_DIR tidak ditemukan"; exit 1; }
 echo "📂 Working directory: $(pwd)"
 
-# 3. Install Dependencies (termasuk prisma CLI di devDependencies)
+# 4. Bersihkan build lama dan node_modules (fresh install)
 echo ""
-echo "📦 [2/6] Menginstall dependencies..."
+echo "🧹 [3/7] Membersihkan build lama..."
+rm -rf dist/
+rm -rf node_modules/
+
+# 5. Install Dependencies (termasuk prisma CLI di devDependencies)
+echo ""
+echo "📦 [4/7] Menginstall dependencies..."
 npm install || { echo "❌ Install gagal"; exit 1; }
 
-# 4. Generate Prisma Client + Build TypeScript
+# 6. Generate Prisma Client + Build TypeScript
 echo ""
-echo "🏗️  [3/6] Build project (prisma generate + tsc)..."
+echo "🏗️  [5/7] Build project (prisma generate + tsc)..."
 npm run build || { echo "❌ Build gagal"; exit 1; }
 
 # Verify build output exists
@@ -38,9 +49,9 @@ if [ ! -f "dist/index.js" ]; then
 fi
 echo "   ✅ Build berhasil"
 
-# 5. Restart PM2 dengan Explicit Node Args (1GB Limit)
+# 6. Restart PM2 dengan Explicit Node Args (1GB Limit)
 echo ""
-echo "♻️  [4/6] Me-restart service dengan limit heap ${MEMORY_LIMIT}MB..."
+echo "♻️  [6/7] Me-restart service dengan limit heap ${MEMORY_LIMIT}MB..."
 
 # Menghapus proses lama agar flag baru terpasang bersih di PM2
 pm2 delete $PROJECT_NAME 2>/dev/null || true
@@ -51,9 +62,9 @@ pm2 start dist/index.js \
   --node-args="--max-old-space-size=$MEMORY_LIMIT" \
   --max-memory-restart "${MEMORY_LIMIT}M"
 
-# 6. Finalisasi & Verifikasi
+# 7. Finalisasi & Verifikasi
 echo ""
-echo "🧹 [5/6] Menyimpan konfigurasi PM2..."
+echo "🧹 [7/7] Menyimpan konfigurasi PM2..."
 pm2 save
 
 echo ""
