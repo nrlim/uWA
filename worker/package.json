@@ -2,11 +2,9 @@
   "name": "worker",
   "version": "1.0.0",
   "main": "dist/index.js",
-  "type": "module",
   "scripts": {
     "install:clean": "npm install --ignore-scripts",
     "prisma:generate": "prisma generate --schema=../prisma/schema.prisma",
-    "postinstall": "npm run prisma:generate",
     "build": "npm run prisma:generate && tsc",
     "start": "node --max-old-space-size=1024 dist/index.js",
     "restart": "pm2 restart uwa-worker",
@@ -18,10 +16,13 @@
   "description": "",
   "dependencies": {
     "@prisma/client": "^6.19.2",
-    "@types/node": "^25.2.3",
     "@whiskeysockets/baileys": "^7.0.0-rc.9",
     "dotenv": "^17.3.1",
-    "pino": "^10.3.1",
+    "pino": "^10.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^25.2.3",
+    "prisma": "^6.19.2",
     "ts-node": "^10.9.2",
     "typescript": "^5.9.3"
   }
