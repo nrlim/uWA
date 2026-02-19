@@ -164,16 +164,18 @@ export default function DashboardPage() {
           </div>
         ) : (
           <div>
-            {recentBroadcasts.map((b, i) => (
-              <div key={b.id} className={`flex items-center justify-between px-6 py-4 hover:bg-slate-50/50 transition-colors group ${i !== recentBroadcasts.length - 1 ? 'border-b border-slate-100' : ''}`}>
+            {recentBroadcasts.map((b) => (
+              <div key={b.id} className="flex items-center justify-between px-6 py-4 hover:bg-slate-50/50 transition-colors group border-b border-slate-100 last:border-0">
                 <div className="flex items-center gap-4">
-                  <div className={`h-10 w-10 rounded-full flex items-center justify-center shrink-0 border ${b.status === 'COMPLETED' ? 'bg-emerald-50/50 border-emerald-100 text-emerald-600' :
-                    b.status === 'FAILED' ? 'bg-red-50/50 border-red-100 text-red-600' :
-                      'bg-blue-50/50 border-blue-100 text-blue-600'
+                  <div className={`h-10 w-10 rounded-full flex items-center justify-center shrink-0 border ${b.status === 'COMPLETED' ? 'bg-emerald-50 border-emerald-100 text-emerald-600' :
+                      b.status === 'FAILED' ? 'bg-red-50 border-red-100 text-red-600' :
+                        b.status === 'PAUSED_NO_CREDIT' ? 'bg-amber-50 border-amber-100 text-amber-600' :
+                          'bg-blue-50 border-blue-100 text-blue-600'
                     }`}>
                     {b.status === 'COMPLETED' ? <CheckCircle2 className="h-5 w-5" /> :
                       b.status === 'FAILED' ? <AlertCircle className="h-5 w-5" /> :
-                        <Zap className="h-5 w-5" />}
+                        b.status === 'PAUSED_NO_CREDIT' ? <AlertCircle className="h-5 w-5" /> :
+                          <Zap className="h-5 w-5" />}
                   </div>
                   <div>
                     <h4 className="font-semibold text-sm text-slate-900">{b.name}</h4>
@@ -192,10 +194,11 @@ export default function DashboardPage() {
                   </div>
 
                   <div className={`px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wide border ${b.status === 'COMPLETED' ? 'bg-emerald-50 text-emerald-600 border-emerald-100' :
-                    b.status === 'FAILED' ? 'bg-red-50 text-red-600 border-red-100' :
-                      'bg-blue-50 text-blue-600 border-blue-100'
+                      b.status === 'FAILED' ? 'bg-red-50 text-red-600 border-red-100' :
+                        b.status === 'PAUSED_NO_CREDIT' ? 'bg-amber-50 text-amber-600 border-amber-100' :
+                          'bg-blue-50 text-blue-600 border-blue-100'
                     }`}>
-                    {b.status}
+                    {b.status === 'PAUSED_NO_CREDIT' ? 'JEDA (KREDIT HABIS)' : b.status}
                   </div>
 
                   <button className="h-8 w-8 flex items-center justify-center rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-100 transition-all opacity-0 group-hover:opacity-100">

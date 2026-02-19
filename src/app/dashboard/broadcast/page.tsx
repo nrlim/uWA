@@ -21,22 +21,22 @@ import {
     Loader2,
     Play,
     Settings2,
-    Smartphone,
-    Upload,
     Users,
     Zap,
     CheckCircle2,
     ChevronRight,
     FileText,
-    type LucideIcon,
     Variable,
     Save,
-    Layout
+    Layout,
+    Clock,
+    ShieldAlert,
+    Upload
 } from "lucide-react"
 import { useRouter } from "next/navigation"
 
 export default function BroadcastPage() {
-    const { activeBroadcast, isLoading: isStatusLoading } = useStatus()
+    const { activeBroadcast, isLoading: isStatusLoading, user } = useStatus()
     const router = useRouter()
 
     // Form State
@@ -49,6 +49,7 @@ export default function BroadcastPage() {
     const [isSubmitting, setIsSubmitting] = useState(false)
     const [error, setError] = useState<string | null>(null)
     const [activeTab, setActiveTab] = useState("manual")
+    const [showAdvanced, setShowAdvanced] = useState(false)
 
     // Template State
     const [templates, setTemplates] = useState<{ id: string; title: string; content: string }[]>([])
@@ -59,8 +60,6 @@ export default function BroadcastPage() {
     // For auto-scrolling preview
     const messagesEndRef = useRef<HTMLDivElement>(null)
 
-    // Only scroll to bottom on initial load or if the user is near the bottom (optional)
-    // Removed automatic scroll on typing to prevent layout shifts
     useEffect(() => {
         if (messagesEndRef.current) {
             messagesEndRef.current.scrollIntoView({ behavior: "smooth", block: "nearest" })
@@ -87,7 +86,6 @@ export default function BroadcastPage() {
         }
     }
 
-    // Handle Smart Tag Insert
     // Handle Save as Template
     const handleSaveAsTemplate = async () => {
         if (!templateTitle.trim() || !message.trim()) return
@@ -118,6 +116,12 @@ export default function BroadcastPage() {
     // Handle Submit
     const handleSubmit = async () => {
         if (!contacts.length || !message) return
+
+        // Client-side Credit Check
+        if (user && user.credit < contacts.length) {
+            setError(`Kredit tidak mencukupi. Anda butuh ${contacts.length} kredit, tapi hanya punya ${user.credit}.`)
+            return
+        }
 
         setIsSubmitting(true)
         setError(null)
@@ -156,13 +160,16 @@ export default function BroadcastPage() {
 
     const isLocked = !!activeBroadcast && activeBroadcast.status === 'RUNNING'
     const estimatedTime = ((contacts.length * ((Number(delayMin) + Number(delayMax)) / 2)) / 60).toFixed(1)
+    const insufficientCredits = user ? user.credit < contacts.length : false
 
     return (
-        <div className="max-w-7xl mx-auto space-y-8 pb-20">
+        <div className="max-w-7xl mx-auto space-y-8 pb-10">
             {/* Header */}
-            <div className="pb-6 border-b border-slate-100">
-                <h1 className="text-2xl font-bold text-slate-900 tracking-tight">Broadcast Baru</h1>
-                <p className="text-slate-500 text-sm mt-1">Konfigurasi pesan dan target audiens kampanye Anda.</p>
+            <div className="pb-6 border-b border-slate-100 flex flex-col md:flex-row md:items-center justify-between gap-4">
+                <div>
+                    <h1 className="text-2xl font-bold text-slate-900 tracking-tight">Broadcast Baru</h1>
+                    <p className="text-slate-500 text-sm mt-1">Konfigurasi pesan dan target audiens kampanye Anda.</p>
+                </div>
             </div>
 
             {isLocked && (
@@ -177,123 +184,121 @@ export default function BroadcastPage() {
                 </div>
             )}
 
-            <div className="grid grid-cols-1 lg:grid-cols-5 gap-8">
-                {/* LEFT COLUMN: Input Configuration (3 cols) */}
-                <div className="lg:col-span-3 space-y-6">
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
+                {/* LEFT COLUMN: Main Form Flow (8/12) */}
+                <div className="lg:col-span-8 space-y-8">
 
-                    {/* Campaign Info */}
-                    <Card className="border border-slate-200 shadow-sm">
-                        <CardHeader className="bg-slate-50/50 pb-4">
-                            <CardTitle className="text-base font-semibold text-slate-900 flex items-center gap-2">
-                                <FileText className="h-4 w-4 text-slate-500" />
-                                Detail Kampanye
-                            </CardTitle>
+                    {/* STEP 1: CAMPAIGN IDENTITY & CONTENT */}
+                    <Card className="border border-slate-200 shadow-sm overflow-hidden">
+                        <CardHeader className="bg-slate-50/50 pb-4 border-b border-slate-100">
+                            <div className="flex items-center justify-between">
+                                <CardTitle className="text-base font-semibold text-slate-900 flex items-center gap-2">
+                                    <div className="h-6 w-6 rounded-full bg-slate-900 text-white flex items-center justify-center text-xs font-bold">1</div>
+                                    Setup & Konten
+                                </CardTitle>
+                                <Badge variant="outline" className="bg-blue-50 text-blue-600 border-blue-200 text-[10px] font-bold px-2 py-0.5">
+                                    SPINTAX ACTIVE
+                                </Badge>
+                            </div>
                         </CardHeader>
-                        <CardContent className="p-6">
-                            <div className="space-y-2">
-                                <Label htmlFor="name" className="text-slate-600 text-xs font-semibold uppercase tracking-wider">Nama Kampanye</Label>
+                        <CardContent className="p-6 space-y-6">
+                            {/* Campaign Name */}
+                            <div className="space-y-1.5">
+                                <Label htmlFor="name" className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Nama Kampanye</Label>
                                 <Input
                                     id="name"
                                     value={name}
                                     onChange={(e) => setName(e.target.value)}
-                                    className="h-11 border-slate-200 focus:border-blue-500 focus:ring-blue-500/10"
+                                    className="h-10 border-slate-200 focus:border-blue-500 focus:ring-blue-500/10 placeholder:text-slate-300"
                                     placeholder="Contoh: Promo Ramadhan 2026"
                                     disabled={isLocked}
                                 />
                             </div>
-                        </CardContent>
-                    </Card>
 
-                    {/* Message Content */}
-                    <Card className="border border-slate-200 shadow-sm overflow-hidden">
-                        <CardHeader className="bg-slate-50/50 pb-4 flex flex-row items-center justify-between">
-                            <CardTitle className="text-base font-semibold text-slate-900 flex items-center gap-2">
-                                <Smartphone className="h-4 w-4 text-slate-500" />
-                                Konten Pesan
-                            </CardTitle>
-                            <Badge variant="outline" className="bg-blue-50 text-blue-600 border-blue-200 text-[10px] font-bold px-2 py-0.5">
-                                SPINTAX SUPPORTED
-                            </Badge>
-                        </CardHeader>
-                        <CardContent className="p-0">
-                            {/* Template Selector */}
-                            {templates.length > 0 && (
-                                <div className="px-6 pt-4 pb-2 border-b border-slate-100 bg-slate-50/30">
-                                    <Label className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1.5 block">
-                                        <Layout className="h-3 w-3 inline mr-1 -mt-0.5" />
-                                        Gunakan Template
-                                    </Label>
-                                    <select
-                                        className="w-full text-sm border border-slate-200 rounded-lg h-9 px-3 text-slate-700 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-400 transition-colors appearance-none cursor-pointer"
-                                        onChange={(e) => {
-                                            const t = templates.find(t => t.id === e.target.value)
-                                            if (t) setMessage(t.content)
-                                        }}
-                                        defaultValue=""
+                            {/* Message Area */}
+                            <div className="space-y-3">
+                                <div className="flex items-center justify-between">
+                                    <Label className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Konten Pesan</Label>
+
+                                    {/* Template Selector Inline */}
+                                    {templates.length > 0 && (
+                                        <div className="flex items-center gap-2">
+                                            <Layout className="h-3 w-3 text-slate-400" />
+                                            <select
+                                                className="text-xs border-none bg-transparent text-blue-600 font-medium cursor-pointer focus:ring-0 p-0 pr-1 hover:underline"
+                                                onChange={(e) => {
+                                                    const t = templates.find(t => t.id === e.target.value)
+                                                    if (t) setMessage(t.content)
+                                                }}
+                                                defaultValue=""
+                                                disabled={isLocked}
+                                            >
+                                                <option value="" disabled>Pilih Template...</option>
+                                                {templates.map(t => (
+                                                    <option key={t.id} value={t.id}>{t.title}</option>
+                                                ))}
+                                            </select>
+                                        </div>
+                                    )}
+                                </div>
+
+                                <div className="relative">
+                                    <Textarea
+                                        placeholder="Halo {Nama}, kami memiliki penawaran {spesial|eksklusif} untuk Anda..."
+                                        className="min-h-[200px] border-slate-200 focus:border-blue-500 focus:ring-blue-500/10 resize-none p-4 text-sm leading-relaxed text-slate-700 selection:bg-blue-100 rounded-xl"
+                                        value={message}
+                                        onChange={(e) => setMessage(e.target.value)}
                                         disabled={isLocked}
-                                    >
-                                        <option value="" disabled>-- Pilih dari Template --</option>
-                                        {templates.map(t => (
-                                            <option key={t.id} value={t.id}>{t.title}</option>
-                                        ))}
-                                    </select>
+                                    />
+                                    <div className="absolute bottom-3 right-3 flex gap-1">
+                                        <Button
+                                            variant="ghost"
+                                            size="sm"
+                                            className="h-6 px-2 text-[10px] text-slate-400 hover:text-blue-600 bg-slate-50 hover:bg-blue-50 border border-slate-100"
+                                            onClick={() => { setTemplateTitle(""); setSaveTemplateOpen(true) }}
+                                            disabled={!message || isLocked}
+                                        >
+                                            <Save className="h-3 w-3 mr-1" /> Simpan
+                                        </Button>
+                                    </div>
                                 </div>
-                            )}
 
-                            <Textarea
-                                placeholder="Halo {Nama}, kami memiliki penawaran {spesial|eksklusif} untuk Anda..."
-                                className="min-h-[250px] border-0 focus-visible:ring-0 resize-none p-6 text-base leading-relaxed text-slate-700 selection:bg-blue-100"
-                                value={message}
-                                onChange={(e) => setMessage(e.target.value)}
-                                disabled={isLocked}
-                            />
-
-                            {/* Smart Tags + Save as Template Toolbar */}
-                            <div className="bg-slate-50/80 border-t border-slate-100 px-6 py-3 flex items-center justify-between gap-2">
-                                <div className="flex items-center gap-2 overflow-x-auto">
-                                    <span className="text-xs font-semibold text-slate-400 mr-2 shrink-0">Smart Tags:</span>
-                                    <Button size="sm" variant="outline" className="h-7 text-xs bg-white text-slate-600 border-slate-200 hover:text-blue-600 hover:border-blue-200" onClick={() => insertTag("{Nama}")}>
-                                        <Variable className="h-3 w-3 mr-1" /> Nama
-                                    </Button>
-                                    <Button size="sm" variant="outline" className="h-7 text-xs bg-white text-slate-600 border-slate-200 hover:text-blue-600 hover:border-blue-200" onClick={() => insertTag("{Var1}")}>
-                                        <Variable className="h-3 w-3 mr-1" /> Var 1
-                                    </Button>
-                                    <Button size="sm" variant="outline" className="h-7 text-xs bg-white text-slate-600 border-slate-200 hover:text-blue-600 hover:border-blue-200" onClick={() => insertTag("{Tanggal}")}>
-                                        <Variable className="h-3 w-3 mr-1" /> Tanggal
-                                    </Button>
+                                {/* Smart Tags Toolbar */}
+                                <div className="flex flex-wrap items-center gap-2">
+                                    <span className="text-[10px] font-semibold text-slate-400 uppercase mr-1">Smart Tags:</span>
+                                    <button onClick={() => insertTag("{Nama}")} className="px-2 py-1 rounded bg-slate-100 hover:bg-slate-200 text-slate-600 text-xs font-medium transition-colors border border-slate-200">
+                                        + Nama
+                                    </button>
+                                    <button onClick={() => insertTag("{Var1}")} className="px-2 py-1 rounded bg-slate-100 hover:bg-slate-200 text-slate-600 text-xs font-medium transition-colors border border-slate-200">
+                                        + Var 1
+                                    </button>
+                                    <button onClick={() => insertTag("{Tanggal}")} className="px-2 py-1 rounded bg-slate-100 hover:bg-slate-200 text-slate-600 text-xs font-medium transition-colors border border-slate-200">
+                                        + Tanggal
+                                    </button>
                                 </div>
-                                <Button
-                                    variant="ghost"
-                                    size="sm"
-                                    className="h-7 text-[11px] text-slate-400 hover:text-blue-600 shrink-0"
-                                    onClick={() => { setTemplateTitle(""); setSaveTemplateOpen(true) }}
-                                    disabled={!message || isLocked}
-                                >
-                                    <Save className="h-3 w-3 mr-1" /> Simpan sebagai Template
-                                </Button>
                             </div>
                         </CardContent>
                     </Card>
 
-                    {/* Audience Section */}
+                    {/* STEP 2: AUDIENCE SELECTION */}
                     <Card className="border border-slate-200 shadow-sm">
-                        <CardHeader className="bg-slate-50/50 pb-4">
+                        <CardHeader className="bg-slate-50/50 pb-4 border-b border-slate-100">
                             <CardTitle className="text-base font-semibold text-slate-900 flex items-center gap-2">
-                                <Users className="h-4 w-4 text-slate-500" />
+                                <div className="h-6 w-6 rounded-full bg-slate-900 text-white flex items-center justify-center text-xs font-bold">2</div>
                                 Target Audiens
                             </CardTitle>
                         </CardHeader>
                         <CardContent className="p-6">
                             <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
-                                <TabsList className="grid w-full grid-cols-2 mb-6 bg-slate-100 h-10 p-1">
-                                    <TabsTrigger value="manual" className="text-xs font-medium">Input Manual</TabsTrigger>
-                                    <TabsTrigger value="upload" className="text-xs font-medium">Upload File</TabsTrigger>
+                                <TabsList className="grid w-full grid-cols-2 mb-6 bg-slate-100 p-1 rounded-lg">
+                                    <TabsTrigger value="manual" className="text-xs font-medium rounded-md">Input Manual</TabsTrigger>
+                                    <TabsTrigger value="upload" className="text-xs font-medium rounded-md">Upload File</TabsTrigger>
                                 </TabsList>
 
-                                <TabsContent value="manual" className="mt-0 space-y-4">
+                                <TabsContent value="manual" className="mt-0">
                                     <Textarea
                                         placeholder="Tempel nomor telepon di sini (satu per baris)..."
-                                        className="min-h-[150px] border-slate-200 font-mono text-sm leading-relaxed"
+                                        className="min-h-[120px] border-slate-200 font-mono text-sm leading-relaxed rounded-xl focus:ring-blue-500/10"
                                         onChange={(e) => {
                                             const text = e.target.value;
                                             const rawNumbers = text.match(/[\d\+\-\(\)\s]+/g) || [];
@@ -302,13 +307,13 @@ export default function BroadcastPage() {
                                         }}
                                         disabled={isLocked}
                                     />
-                                    <p className="text-xs text-slate-400 text-right">
-                                        Mendukung format +62, 08, atau 62.
+                                    <p className="text-[10px] text-slate-400 text-right mt-2">
+                                        Mendukung format +62, 08, 62.
                                     </p>
                                 </TabsContent>
 
                                 <TabsContent value="upload" className="mt-0">
-                                    <div className="border border-dashed border-slate-300 rounded-xl p-8 text-center hover:bg-slate-50 transition-all cursor-pointer relative bg-slate-50/30">
+                                    <div className="border-2 border-dashed border-slate-200 rounded-xl p-8 text-center hover:bg-slate-50/50 hover:border-blue-400 transition-all cursor-pointer relative group">
                                         <Input
                                             type="file"
                                             className="absolute inset-0 opacity-0 cursor-pointer z-10 w-full h-full"
@@ -316,149 +321,192 @@ export default function BroadcastPage() {
                                             onChange={handleFileUpload}
                                             disabled={isLocked}
                                         />
-                                        <div className="h-10 w-10 bg-white rounded-full flex items-center justify-center mx-auto mb-3 shadow-sm border border-slate-100">
-                                            <Upload className="h-5 w-5 text-slate-500" />
+                                        <div className="h-12 w-12 bg-blue-50 rounded-full flex items-center justify-center mx-auto mb-3 group-hover:scale-110 transition-transform">
+                                            <Upload className="h-5 w-5 text-blue-600" />
                                         </div>
-                                        <p className="font-semibold text-slate-900 text-sm">
-                                            {file ? file.name : "Klik atau lepas file di sini"}
+                                        <p className="font-semibold text-slate-900 text-sm group-hover:text-blue-700">
+                                            {file ? file.name : "Klik untuk upload file kontak"}
                                         </p>
                                         <p className="text-xs text-slate-500 mt-1">Format .csv atau .txt (Maks 10MB)</p>
                                     </div>
                                 </TabsContent>
                             </Tabs>
 
-                            {/* Counter */}
+                            {/* Audience Summary */}
                             {contacts.length > 0 && (
-                                <div className="flex items-center justify-between mt-6 p-4 bg-emerald-50 rounded-lg border border-emerald-100">
-                                    <div className="flex items-center gap-3">
-                                        <div className="bg-white p-1.5 rounded-full shadow-sm">
-                                            <CheckCircle2 className="h-4 w-4 text-emerald-600" />
-                                        </div>
-                                        <span className="font-bold text-emerald-900 text-sm">{contacts.length} Kontak Valid</span>
+                                <div className="mt-4 flex items-center justify-between p-3 bg-emerald-50 border border-emerald-100 rounded-lg">
+                                    <div className="flex items-center gap-2">
+                                        <CheckCircle2 className="h-4 w-4 text-emerald-600" />
+                                        <span className="text-sm font-semibold text-emerald-900">{contacts.length} Penerima Valid</span>
                                     </div>
-                                    <button onClick={() => { setContacts([]); setFile(null) }} className="text-[10px] font-bold text-emerald-600/70 hover:text-emerald-700 uppercase tracking-wide">
-                                        Hapus List
+                                    <button onClick={() => { setContacts([]); setFile(null) }} className="text-xs text-emerald-700 hover:text-emerald-900 font-medium underline">
+                                        Reset
                                     </button>
                                 </div>
                             )}
                         </CardContent>
                     </Card>
+
+                    {/* STEP 3: SENDING LOGIC */}
+                    <Card className="border border-slate-200 shadow-sm">
+                        <CardHeader className="bg-slate-50/50 pb-4 border-b border-slate-100">
+                            <CardTitle className="text-base font-semibold text-slate-900 flex items-center gap-2">
+                                <div className="h-6 w-6 rounded-full bg-slate-900 text-white flex items-center justify-center text-xs font-bold">3</div>
+                                Logika Pengiriman
+                            </CardTitle>
+                        </CardHeader>
+                        <CardContent className="p-6 space-y-6">
+                            <div className="grid grid-cols-2 gap-6">
+                                <div className="space-y-3">
+                                    <Label className="text-xs font-semibold text-slate-500 uppercase tracking-wider flex items-center gap-2">
+                                        Interval Pengiriman
+                                        <ShieldAlert className="h-3 w-3 text-emerald-600" />
+                                    </Label>
+                                    <div className="flex items-center gap-2">
+                                        <div className="relative flex-1">
+                                            <Input
+                                                type="number"
+                                                value={delayMin}
+                                                onChange={(e) => setDelayMin(Number(e.target.value))}
+                                                className="pl-3 pr-8 h-10 font-mono text-sm"
+                                            />
+                                            <span className="absolute right-3 top-2.5 text-xs text-slate-400">s</span>
+                                        </div>
+                                        <span className="text-slate-400 font-medium">–</span>
+                                        <div className="relative flex-1">
+                                            <Input
+                                                type="number"
+                                                value={delayMax}
+                                                onChange={(e) => setDelayMax(Number(e.target.value))}
+                                                className="pl-3 pr-8 h-10 font-mono text-sm"
+                                            />
+                                            <span className="absolute right-3 top-2.5 text-xs text-slate-400">s</span>
+                                        </div>
+                                    </div>
+                                    <p className="text-[10px] text-slate-400">Sistem akan mengacak jeda antara {delayMin}-{delayMax} detik untuk menghindari blokir.</p>
+                                </div>
+
+                                <div className="p-4 bg-slate-50 rounded-lg border border-slate-100 flex flex-col justify-center">
+                                    <div className="text-xs text-slate-500 mb-1">Estimasi Selesai</div>
+                                    <div className="flex items-baseline gap-1">
+                                        <span className="text-2xl font-bold text-slate-900">~{estimatedTime}</span>
+                                        <span className="text-sm font-medium text-slate-500">Menit</span>
+                                    </div>
+                                </div>
+                            </div>
+
+                            {/* Primary Action Button */}
+                            <div className="pt-4 border-t border-slate-100">
+                                <Button
+                                    size="lg"
+                                    className="w-full h-14 text-base font-bold bg-slate-900 hover:bg-slate-800 text-white shadow-xl shadow-slate-900/10 transition-all rounded-xl"
+                                    onClick={handleSubmit}
+                                    disabled={isLocked || isSubmitting || !contacts.length || !message || insufficientCredits}
+                                >
+                                    {isSubmitting ? (
+                                        <><Loader2 className="h-5 w-5 mr-3 animate-spin" /> Sedang Memproses Broadcast...</>
+                                    ) : insufficientCredits ? (
+                                        <><AlertCircle className="h-5 w-5 mr-3 text-red-300" /> Kredit Tidak Mencukupi</>
+                                    ) : (
+                                        <><Play className="h-5 w-5 mr-3 fill-current" /> Mulai Broadcast Sekarang</>
+                                    )}
+                                </Button>
+                                {error && (
+                                    <div className="mt-4 p-3 bg-red-50 text-red-600 rounded-lg text-sm text-center flex items-center justify-center gap-2">
+                                        <AlertCircle className="h-4 w-4" /> {error}
+                                    </div>
+                                )}
+                            </div>
+                        </CardContent>
+                    </Card>
+
+
                 </div>
 
-                {/* RIGHT COLUMN: Preview & Config (2 cols) */}
-                <div className="lg:col-span-2 space-y-6">
+                {/* RIGHT COLUMN: Sticky Preview (4/12) */}
+                <div className="lg:col-span-4">
+                    <div className="sticky top-8 space-y-6">
+                        <div className="flex items-center justify-between text-sm mb-4 px-2">
+                            <span className="font-semibold text-slate-900">Live Preview</span>
+                            <span className="text-xs text-slate-400">WhatsApp Android</span>
+                        </div>
 
-                    {/* Smartphone Preview */}
-                    <div className="sticky top-6">
-                        <div className="bg-slate-800 rounded-[2.5rem] p-3 shadow-2xl border-[4px] border-slate-700 max-w-[320px] mx-auto relative">
-                            {/* Notch & Sensors */}
+                        {/* Smartphone Mockup */}
+                        <div className="bg-slate-800 rounded-[2.5rem] p-3 shadow-2xl border-[4px] border-slate-700 mx-auto relative transform scale-95 lg:scale-100 transition-transform">
+                            {/* Notch */}
                             <div className="absolute top-0 left-1/2 -translate-x-1/2 h-5 w-24 bg-slate-900 rounded-b-xl z-20"></div>
 
                             {/* Screen */}
-                            <div className="bg-[#E2E5E8] h-[520px] rounded-[2rem] overflow-hidden flex flex-col relative w-full">
-                                {/* Header */}
+                            <div className="bg-[#E2E5E8] h-[550px] rounded-[2rem] overflow-hidden flex flex-col relative w-full font-sans">
+                                {/* WhatsApp Header */}
                                 <div className="bg-[#008069] px-4 pt-8 pb-3 text-white flex items-center gap-3 shadow-sm z-10">
-                                    <div className="h-8 w-8 rounded-full bg-slate-200/20 flex items-center justify-center">
-                                        <Users className="h-4 w-4 text-white" />
+                                    <div className="h-9 w-9 rounded-full bg-slate-200/20 flex items-center justify-center">
+                                        <Users className="h-5 w-5 text-white" />
                                     </div>
                                     <div className="flex-1">
-                                        <div className="font-semibold text-xs leading-tight">Broadcast List</div>
-                                        <div className="text-[9px] opacity-80 leading-tight">tap for info</div>
+                                        <div className="font-semibold text-sm leading-tight">Broadcast List</div>
+                                        <div className="text-[10px] opacity-80 leading-tight truncate w-32">
+                                            {contacts.length > 0 ? `${contacts.length} recipients` : 'tap for info'}
+                                        </div>
                                     </div>
-                                    <div className="flex gap-3 text-white/80">
-                                        <div className="h-3 w-3 border border-white/80 rounded-sm"></div>
-                                        <div className="h-3 w-3 bg-white/80 rounded-full"></div>
+                                    <div className="flex gap-4 text-white/90">
+                                        <div className="h-3.5 w-3.5 border-2 border-white/80 rounded-sm"></div>
+                                        <div className="h-1 w-1 bg-white rounded-full box-content border-[3px] border-transparent"></div>
                                     </div>
                                 </div>
 
-                                {/* Chat Bg & Bubbles */}
-                                <div className="flex-1 p-3 overflow-y-auto bg-[url('https://user-images.githubusercontent.com/15075759/28719144-86dc0f70-73b1-11e7-911d-60d70fcded21.png')] bg-repeat bg opacity-90">
-                                    <div className="flex justify-center my-3">
-                                        <span className="bg-[#e1f3fb] text-[9px] text-slate-500 font-medium px-2 py-0.5 rounded shadow-sm">
+                                {/* Chat Bg */}
+                                <div className="flex-1 p-3 overflow-y-auto bg-[url('https://user-images.githubusercontent.com/15075759/28719144-86dc0f70-73b1-11e7-911d-60d70fcded21.png')] bg-repeat bg opacity-90 relative">
+                                    <div className="flex justify-center my-4">
+                                        <span className="bg-[#e2f1fb] text-[10px] text-slate-600 font-medium px-2.5 py-1 rounded-lg shadow-sm">
                                             HARI INI
                                         </span>
                                     </div>
 
                                     {message ? (
-                                        <div className="bg-white rounded-lg p-2.5 shadow-sm max-w-[90%] ml-auto relative break-words">
-                                            <p className="text-[13px] text-slate-900 leading-snug whitespace-pre-wrap">
+                                        <div className="bg-white rounded-tr-none rounded-lg p-2.5 shadow-[0_1px_0.5px_rgba(0,0,0,0.13)] max-w-[85%] ml-auto relative break-words animate-in slide-in-from-right-2 duration-300">
+                                            <p className="text-[13.5px] text-[#111b21] leading-[19px] whitespace-pre-wrap">
                                                 {message.replace(/\{([^{}]+)\}/g, (match, content) => content.split('|')[0])}
                                             </p>
-                                            <div className="flex justify-end items-center gap-1 mt-1 opacity-50">
-                                                <span className="text-[9px]">{new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
-                                                <CheckCircle2 className="h-2.5 w-2.5 text-blue-500" />
+                                            <div className="flex justify-end items-center gap-1 mt-1 opacity-60">
+                                                <span className="text-[10px] text-slate-500">{new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+                                                <CheckCircle2 className="h-2.5 w-2.5 text-[#53bdeb]" />
                                             </div>
+                                            {/* Tail */}
+                                            <div className="absolute top-0 -right-2 w-0 h-0 border-t-[0px] border-r-[10px] border-b-[10px] border-l-[0px] border-l-transparent border-r-transparent border-b-transparent border-t-white transform rotate-0"
+                                                style={{
+                                                    filter: 'drop-shadow(1px 0px 0px rgba(0,0,0,0.05))',
+                                                    clipPath: 'polygon(0 0, 100% 0, 0 100%)',
+                                                    background: 'white',
+                                                    width: '12px',
+                                                    height: '12px',
+                                                    zIndex: 10
+                                                }}
+                                            />
                                         </div>
                                     ) : (
-                                        <div className="h-full flex items-center justify-center">
-                                            <div className="bg-black/5 text-slate-500 text-[10px] px-3 py-1 rounded-full text-center max-w-[80%]">
-                                                Pratinjau pesan Anda akan muncul di sini secara real-time.
+                                        <div className="flex h-full items-center justify-center opacity-40">
+                                            <div className="text-center">
+                                                <div className="bg-slate-200 h-16 w-32 rounded-lg mb-2 mx-auto"></div>
+                                                <div className="text-[10px] font-medium text-slate-500">Pratinjau Pesan</div>
                                             </div>
                                         </div>
                                     )}
                                     <div ref={messagesEndRef} />
                                 </div>
+
+                                {/* Input Bar Mockup */}
+                                <div className="bg-[#f0f2f5] p-2 flex items-center gap-2">
+                                    <div className="h-8 w-8 rounded-full bg-white flex items-center justify-center text-slate-400">
+                                        <div className="h-4 w-4 border-2 border-current rounded-full"></div>
+                                    </div>
+                                    <div className="flex-1 h-9 bg-white rounded-lg"></div>
+                                    <div className="h-9 w-9 rounded-full bg-[#008069] flex items-center justify-center">
+                                        <div className="h-0 w-0 border-y-[5px] border-y-transparent border-l-[8px] border-l-white ml-0.5"></div>
+                                    </div>
+                                </div>
                             </div>
                         </div>
-
-                        {/* Configuration Card */}
-                        <Card className="mt-6 border-slate-200 shadow-lg bg-white relative overflow-hidden">
-                            <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-blue-500 to-indigo-500"></div>
-                            <CardContent className="p-6 space-y-6">
-                                <div className="flex items-center justify-between">
-                                    <Label className="text-xs font-bold text-slate-500 uppercase tracking-widest">Jeda Pesan (Detik)</Label>
-                                    <div className="bg-slate-100 text-slate-600 text-[10px] font-bold px-2 py-1 rounded">
-                                        SAFETY MODE
-                                    </div>
-                                </div>
-
-                                <div className="flex items-center gap-4">
-                                    <Input
-                                        type="number"
-                                        value={delayMin}
-                                        onChange={(e) => setDelayMin(Number(e.target.value))}
-                                        className="text-center font-bold text-slate-900 h-10 border-slate-200 bg-slate-50"
-                                    />
-                                    <span className="text-slate-400 font-medium">-</span>
-                                    <Input
-                                        type="number"
-                                        value={delayMax}
-                                        onChange={(e) => setDelayMax(Number(e.target.value))}
-                                        className="text-center font-bold text-slate-900 h-10 border-slate-200 bg-slate-50"
-                                    />
-                                </div>
-
-                                <div className="space-y-2 pt-2 border-t border-slate-100">
-                                    <div className="flex justify-between text-xs text-slate-500">
-                                        <span>Target Penerima</span>
-                                        <span className="font-medium text-slate-900">{contacts.length} Kontak</span>
-                                    </div>
-                                    <div className="flex justify-between text-xs text-slate-500">
-                                        <span>Estimasi Waktu</span>
-                                        <span className="font-medium text-slate-900">~{estimatedTime} Menit</span>
-                                    </div>
-                                </div>
-
-                                <Button
-                                    className="w-full h-12 text-sm font-bold bg-slate-900 hover:bg-slate-800 text-white shadow-lg shadow-slate-900/10 transition-all rounded-lg"
-                                    onClick={handleSubmit}
-                                    disabled={isLocked || isSubmitting || !contacts.length || !message}
-                                >
-                                    {isSubmitting ? (
-                                        <><Loader2 className="h-4 w-4 mr-2 animate-spin" /> Memproses...</>
-                                    ) : (
-                                        <><Play className="h-4 w-4 mr-2" /> Kirim Broadcast</>
-                                    )}
-                                </Button>
-
-                                {error && (
-                                    <div className="flex items-center gap-2 p-3 bg-red-50 text-red-600 rounded-lg text-xs font-medium">
-                                        <AlertCircle className="h-4 w-4 shrink-0" />
-                                        {error}
-                                    </div>
-                                )}
-                            </CardContent>
-                        </Card>
                     </div>
                 </div>
             </div>

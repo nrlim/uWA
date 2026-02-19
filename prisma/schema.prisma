@@ -13,6 +13,8 @@ model Instance {
   name      String   @unique
   status    String   @default("DISCONNECTED")
   qrCode    String?
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
   updatedAt DateTime @updatedAt
 }
 
@@ -31,6 +33,8 @@ model Broadcast {
   dailyLimit        Int       @default(0)      // 0 = no limit
   workingHourStart  Int       @default(5)      // 05:00 (Human Clock: awake)
   workingHourEnd    Int       @default(23)     // 23:00 (Human Clock: sleep 23–05)
+  userId            String
+  user              User      @relation(fields: [userId], references: [id])
   messages          Message[]
   logs              BroadcastLog[]
 }
@@ -58,8 +62,35 @@ model BroadcastLog {
 
 model Template {
   id        String   @id @default(cuid())
-  userId    String? 
+  userId    String 
+  user      User     @relation(fields: [userId], references: [id])
   title     String
   content   String
   createdAt DateTime @default(now())
+}
+
+enum Plan {
+  TRIAL
+  STARTER
+  PRO
+  ELITE
+}
+
+model User {
+  id        String   @id @default(cuid())
+  username  String   @unique
+  email     String   @unique
+  phone     String   @unique
+  password  String
+  name      String?
+  role          String   @default("USER") // USER, ADMIN
+  plan          Plan     @default(TRIAL) 
+  credit        Int      @default(100)      // Monthly message limit (Trial default)
+  accountLimit  Int      @default(1)         // WhatsApp connection limit
+  templateLimit Int      @default(5)         // Template creation limit
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  instances     Instance[]
+  broadcasts    Broadcast[]
+  templates     Template[]
 }

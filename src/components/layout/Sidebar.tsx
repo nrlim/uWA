@@ -69,7 +69,17 @@ export function Sidebar() {
                         <p className="text-xs font-semibold text-slate-200 truncate">Admin User</p>
                         <p className="text-[10px] text-slate-500 truncate">Premium Plan</p>
                     </div>
-                    <button className="text-slate-500 hover:text-white transition-colors">
+                    <button
+                        onClick={async () => {
+                            try {
+                                await fetch('/api/auth/logout', { method: 'POST' });
+                                window.location.href = '/';
+                            } catch (e) {
+                                console.error('Logout failed', e);
+                            }
+                        }}
+                        className="text-slate-500 hover:text-white transition-colors"
+                    >
                         <LogOut className="h-4 w-4" />
                     </button>
                 </div>

@@ -1,9 +1,8 @@
 "use client"
 
 import { useState } from "react"
-
 import { useStatus } from "@/contexts/StatusContext"
-import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card"
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { QRCodeSVG } from "qrcode.react"
 import {
     CheckCircle2,
@@ -17,7 +16,6 @@ import {
     Lock
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
-import { Badge } from "@/components/ui/badge"
 
 export default function ConnectionPage() {
     const { instance, isLoading, refresh } = useStatus()

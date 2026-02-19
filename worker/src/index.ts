@@ -581,6 +581,7 @@ async function startBroadcastProcessor() {
                 where: { status: { in: ['PENDING', 'RUNNING'] } },
                 orderBy: { createdAt: 'asc' },
                 include: {
+                    user: true, // Fetch user to check credits
                     messages: {
                         where: { status: 'PENDING' },
                         take: 1,
@@ -590,6 +591,24 @@ async function startBroadcastProcessor() {
 
             if (!broadcast) {
                 await wait(5000);
+                continue;
+            }
+
+            // ── Credit Check Guard ────────────────────────────
+            if (broadcast.user.credit <= 0) {
+                await logAntiBanAction(
+                    broadcast.id,
+                    'CREDIT_EXHAUSTED',
+                    `User ${broadcast.user.username} ran out of credits. Pausing broadcast.`
+                );
+
+                console.warn(`[CREDIT] ⛔ User ${broadcast.user.username} has 0 credits. Pausing broadcast.`);
+
+                await prisma.broadcast.update({
+                    where: { id: broadcast.id },
+                    data: { status: 'PAUSED_NO_CREDIT' } // Ensure this status is handled or just use FAILED/PAUSED
+                });
+
                 continue;
             }
 
@@ -786,6 +805,12 @@ async function startBroadcastProcessor() {
                 await prisma.broadcast.update({
                     where: { id: broadcast.id },
                     data: { sent: { increment: 1 } },
+                });
+
+                // Deduct user credit
+                await prisma.user.update({
+                    where: { id: broadcast.userId },
+                    data: { credit: { decrement: 1 } },
                 });
 
                 dailySentCount++;

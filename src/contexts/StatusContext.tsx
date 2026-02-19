@@ -22,10 +22,19 @@ interface Broadcast {
     createdAt: string
 }
 
+interface User {
+    id: string
+    name: string | null
+    email: string
+    plan: string
+    credit: number
+}
+
 interface StatusContextType {
     instance: Instance | null
     activeBroadcast: Broadcast | null
     recentBroadcasts: Broadcast[]
+    user: User | null
     isLoading: boolean
     refresh: () => void
 }
@@ -36,6 +45,7 @@ export function StatusProvider({ children }: { children: React.ReactNode }) {
     const [instance, setInstance] = useState<Instance | null>(null)
     const [activeBroadcast, setActiveBroadcast] = useState<Broadcast | null>(null)
     const [recentBroadcasts, setRecentBroadcasts] = useState<Broadcast[]>([])
+    const [user, setUser] = useState<User | null>(null)
     const [isLoading, setIsLoading] = useState(true)
 
     const fetchStatus = async () => {
@@ -46,6 +56,7 @@ export function StatusProvider({ children }: { children: React.ReactNode }) {
                 setInstance(data.instance)
                 setActiveBroadcast(data.activeBroadcast)
                 setRecentBroadcasts(data.recent || [])
+                setUser(data.user || null)
             }
         } catch (error) {
             console.error("Failed to fetch status:", error)
@@ -56,12 +67,12 @@ export function StatusProvider({ children }: { children: React.ReactNode }) {
 
     useEffect(() => {
         fetchStatus()
-        const interval = setInterval(fetchStatus, 2000) // Poll every 2 seconds
+        const interval = setInterval(fetchStatus, 5000) // Poll every 5 seconds (slower is fine)
         return () => clearInterval(interval)
     }, [])
 
     return (
-        <StatusContext.Provider value={{ instance, activeBroadcast, recentBroadcasts, isLoading, refresh: fetchStatus }}>
+        <StatusContext.Provider value={{ instance, activeBroadcast, recentBroadcasts, user, isLoading, refresh: fetchStatus }}>
             {children}
         </StatusContext.Provider>
     )

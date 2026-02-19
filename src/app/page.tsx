@@ -50,11 +50,13 @@ export default function LandingPage() {
                         <Link href="#fitur" className="text-sm font-medium text-slate-600 hover:text-slate-900 transition-colors">Fitur</Link>
                         <Link href="#cara-kerja" className="text-sm font-medium text-slate-600 hover:text-slate-900 transition-colors">Cara Kerja</Link>
                         <Link href="#harga" className="text-sm font-medium text-slate-600 hover:text-slate-900 transition-colors">Harga</Link>
-                        <Link href="/dashboard">
-                            <Button className="bg-slate-900 hover:bg-slate-800 text-white font-medium px-6 h-10 rounded-full text-sm shadow-md hover:shadow-lg transition-all">
-                                Akses Dashboard
-                            </Button>
-                        </Link>
+                        <div className="flex items-center gap-4">
+                            <Link href="/login">
+                                <Button className="bg-slate-900 hover:bg-slate-800 text-white font-medium px-6 h-10 rounded-full text-sm shadow-md hover:shadow-lg transition-all">
+                                    Masuk
+                                </Button>
+                            </Link>
+                        </div>
                     </nav>
 
                     {/* Mobile Menu Toggle */}
@@ -387,7 +389,7 @@ export default function LandingPage() {
                         <div className="text-center max-w-3xl mx-auto mb-20">
                             <h2 className="text-4xl md:text-5xl font-bold text-slate-900 mb-6 tracking-tight">Harga Transparan</h2>
                             <p className="text-xl text-slate-500">
-                                Pilih paket yang sesuai dengan pertumbuhan bisnis Anda. Tanpa biaya tersembunyi.
+                                Pilih paket yang sesuai dengan kebutuhan automasi Anda. Upgrade kapan saja.
                             </p>
                         </div>
 
@@ -396,64 +398,66 @@ export default function LandingPage() {
                             {/* Starter Plan */}
                             <div className="p-8 rounded-3xl border border-slate-200 bg-white hover:border-slate-300 transition-colors">
                                 <h3 className="text-xl font-bold text-slate-900 mb-2">Starter</h3>
-                                <p className="text-slate-500 mb-6 text-sm">Untuk individu & UMKM.</p>
+                                <p className="text-slate-500 mb-6 text-sm">Validasi pasar & bisnis pemula.</p>
                                 <div className="mb-6">
-                                    <span className="text-4xl font-bold text-slate-900">RP 149rb</span>
+                                    <span className="text-4xl font-bold text-slate-900">RP 99rb</span>
                                     <span className="text-slate-500 text-sm">/bulan</span>
                                 </div>
-                                <Link href="/dashboard">
+                                <Link href="/register?plan=starter">
                                     <Button variant="outline" className="w-full rounded-xl h-12 border-slate-300 font-semibold mb-8 hover:bg-slate-50 hover:text-slate-900">
-                                        Pilih Paket Ini
+                                        Pilih Starter
                                     </Button>
                                 </Link>
                                 <ul className="space-y-4 text-sm text-slate-600">
-                                    <li className="flex items-center gap-3"><CheckCircle2 className="h-4 w-4 text-teal-600 shrink-0" /> 1 Device WhatsApp</li>
-                                    <li className="flex items-center gap-3"><CheckCircle2 className="h-4 w-4 text-teal-600 shrink-0" /> 500 Pesan/hari</li>
-                                    <li className="flex items-center gap-3"><CheckCircle2 className="h-4 w-4 text-teal-600 shrink-0" /> Spintax Dasar</li>
-                                    <li className="flex items-center gap-3"><CheckCircle2 className="h-4 w-4 text-teal-600 shrink-0" /> Email Support</li>
+                                    <li className="flex items-center gap-3"><CheckCircle2 className="h-4 w-4 text-teal-600 shrink-0" /> 1 Akun WhatsApp</li>
+                                    <li className="flex items-center gap-3"><CheckCircle2 className="h-4 w-4 text-teal-600 shrink-0" /> 1.500 Pesan / bulan</li>
+                                    <li className="flex items-center gap-3"><CheckCircle2 className="h-4 w-4 text-teal-600 shrink-0" /> Human Mimicry (Anti-Banned)</li>
+                                    <li className="flex items-center gap-3"><CheckCircle2 className="h-4 w-4 text-teal-600 shrink-0" /> Template Dasar</li>
                                 </ul>
                             </div>
 
                             {/* Pro Plan */}
-                            <div className="p-8 rounded-3xl border-2 border-teal-500 bg-slate-50 relative transform md:-translate-y-4 shadow-xl">
-                                <div className="absolute top-0 right-0 bg-teal-500 text-white text-xs font-bold px-3 py-1.5 rounded-bl-xl rounded-tr-2xl tracking-wide uppercase">Most Popular</div>
-                                <h3 className="text-xl font-bold text-slate-900 mb-2">Professional</h3>
-                                <p className="text-slate-500 mb-6 text-sm">Untuk bisnis berkembang.</p>
+                            <div className="p-8 rounded-3xl border-2 border-indigo-500 bg-slate-50 relative transform md:-translate-y-4 shadow-xl">
+                                <div className="absolute top-0 right-0 bg-indigo-500 text-white text-xs font-bold px-3 py-1.5 rounded-bl-xl rounded-tr-2xl tracking-wide uppercase">Best Value</div>
+                                <h3 className="text-xl font-bold text-slate-900 mb-2">Pro</h3>
+                                <p className="text-slate-500 mb-6 text-sm">Untuk pertumbuhan bisnis yang cepat.</p>
+                                <div className="mb-6">
+                                    <span className="text-4xl font-bold text-slate-900">RP 149rb</span>
+                                    <span className="text-slate-500 text-sm">/bulan</span>
+                                </div>
+                                <Link href="/register?plan=pro">
+                                    <Button className="w-full rounded-xl h-12 bg-indigo-600 hover:bg-indigo-700 font-semibold mb-8 text-white shadow-md">
+                                        Pilih Pro
+                                    </Button>
+                                </Link>
+                                <ul className="space-y-4 text-sm text-slate-700 font-medium">
+                                    <li className="flex items-center gap-3"><CheckCircle2 className="h-4 w-4 text-indigo-600 shrink-0" /> 3 Akun WhatsApp</li>
+                                    <li className="flex items-center gap-3"><CheckCircle2 className="h-4 w-4 text-indigo-600 shrink-0" /> 7.500 Pesan / bulan</li>
+                                    <li className="flex items-center gap-3"><CheckCircle2 className="h-4 w-4 text-indigo-600 shrink-0" /> Human Mimicry (Advanced)</li>
+                                    <li className="flex items-center gap-3"><CheckCircle2 className="h-4 w-4 text-indigo-600 shrink-0" /> Template Unlimited</li>
+                                    <li className="flex items-center gap-3"><CheckCircle2 className="h-4 w-4 text-indigo-600 shrink-0" /> Prioritas Support</li>
+                                </ul>
+                            </div>
+
+                            {/* Elite Plan */}
+                            <div className="p-8 rounded-3xl border border-slate-200 bg-white hover:border-slate-300 transition-colors">
+                                <h3 className="text-xl font-bold text-slate-900 mb-2">Elite</h3>
+                                <p className="text-slate-500 mb-6 text-sm">Skala besar & Enterprise.</p>
                                 <div className="mb-6">
                                     <span className="text-4xl font-bold text-slate-900">RP 299rb</span>
                                     <span className="text-slate-500 text-sm">/bulan</span>
                                 </div>
-                                <Link href="/dashboard">
-                                    <Button className="w-full rounded-xl h-12 bg-teal-600 hover:bg-teal-700 font-semibold mb-8 text-white shadow-md">
-                                        Pilih Paket Ini
-                                    </Button>
-                                </Link>
-                                <ul className="space-y-4 text-sm text-slate-700 font-medium">
-                                    <li className="flex items-center gap-3"><CheckCircle2 className="h-4 w-4 text-teal-600 shrink-0" /> 3 Device WhatsApp</li>
-                                    <li className="flex items-center gap-3"><CheckCircle2 className="h-4 w-4 text-teal-600 shrink-0" /> Unlimited Pesan</li>
-                                    <li className="flex items-center gap-3"><CheckCircle2 className="h-4 w-4 text-teal-600 shrink-0" /> Spintax Advanced</li>
-                                    <li className="flex items-center gap-3"><CheckCircle2 className="h-4 w-4 text-teal-600 shrink-0" /> Priority Support</li>
-                                    <li className="flex items-center gap-3"><CheckCircle2 className="h-4 w-4 text-teal-600 shrink-0" /> API Access</li>
-                                </ul>
-                            </div>
-
-                            {/* Enterprise Plan */}
-                            <div className="p-8 rounded-3xl border border-slate-200 bg-white hover:border-slate-300 transition-colors">
-                                <h3 className="text-xl font-bold text-slate-900 mb-2">Enterprise</h3>
-                                <p className="text-slate-500 mb-6 text-sm">Solusi skala besar.</p>
-                                <div className="mb-6">
-                                    <span className="text-4xl font-bold text-slate-900">Custom</span>
-                                </div>
-                                <Link href="/dashboard">
+                                <Link href="/register?plan=elite">
                                     <Button variant="outline" className="w-full rounded-xl h-12 border-slate-300 font-semibold mb-8 hover:bg-slate-50 hover:text-slate-900">
-                                        Hubungi Sales
+                                        Pilih Elite
                                     </Button>
                                 </Link>
                                 <ul className="space-y-4 text-sm text-slate-600">
-                                    <li className="flex items-center gap-3"><CheckCircle2 className="h-4 w-4 text-teal-600 shrink-0" /> Unlimited Device</li>
-                                    <li className="flex items-center gap-3"><CheckCircle2 className="h-4 w-4 text-teal-600 shrink-0" /> Dedicated Server</li>
-                                    <li className="flex items-center gap-3"><CheckCircle2 className="h-4 w-4 text-teal-600 shrink-0" /> Whitelabel Option</li>
-                                    <li className="flex items-center gap-3"><CheckCircle2 className="h-4 w-4 text-teal-600 shrink-0" /> 24/7 Dedicated Support</li>
+                                    <li className="flex items-center gap-3"><CheckCircle2 className="h-4 w-4 text-teal-600 shrink-0" /> 5 Akun WhatsApp</li>
+                                    <li className="flex items-center gap-3"><CheckCircle2 className="h-4 w-4 text-teal-600 shrink-0" /> Unlimited Pesan*</li>
+                                    <li className="flex items-center gap-3"><CheckCircle2 className="h-4 w-4 text-teal-600 shrink-0" /> AI Message Randomizer</li>
+                                    <li className="flex items-center gap-3"><CheckCircle2 className="h-4 w-4 text-teal-600 shrink-0" /> Full Features + API Access</li>
+                                    <li className="flex items-center gap-3"><CheckCircle2 className="h-4 w-4 text-teal-600 shrink-0" /> Dedicated Manager</li>
                                 </ul>
                             </div>
 
