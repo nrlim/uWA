@@ -60,3 +60,6 @@ auth_info_baileys/
 worker/dist/
 worker/auth_info_baileys/
 
+# Lock files (berubah setiap npm install di VPS)
+package-lock.json
+worker/package-lock.json
