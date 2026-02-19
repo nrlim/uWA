@@ -3,55 +3,41 @@
 # --- Configuration ---
 PROJECT_NAME="uwa-worker"
 WORKER_DIR="./worker"
-# SCHEMA_PATH is now handled by package.json scripts (postinstall)
-# But we can still keep it explicit if needed.
-MEMORY_LIMIT=1024  # Limit 1GB (1024MB) untuk stabilitas engine Baileys
 
-echo "🚀 Memulai Deployment uWA Worker dengan Optimasi Memori (Senior Mode)..."
+echo "🚀 Memulai Deployment uWA Worker..."
 
 # 1. Update Source Code
 echo "📥 Menarik kode terbaru dari repository..."
 git pull origin main || { echo "❌ Git pull gagal"; exit 1; }
 
-# 2. Masuk ke direktori worker
+# 2. Install root dependencies & Generate Prisma Client dari root
+echo "📦 Menginstall root dependencies..."
+npm install || { echo "❌ Root install gagal"; exit 1; }
+
+echo "💎 Menghasilkan Prisma Client dari root schema..."
+npx prisma generate || { echo "❌ Prisma generate gagal"; exit 1; }
+
+# 3. Install worker dependencies
+echo "📦 Menginstall worker dependencies..."
 cd $WORKER_DIR || { echo "❌ Folder $WORKER_DIR tidak ditemukan"; exit 1; }
+npm install || { echo "❌ Worker install gagal"; exit 1; }
 
-# 3. Instalasi Dependencies & Generate Prisma Client
-# Karena kita menambahkan "postinstall": "prisma generate ..." di package.json,
-# npm install akan otomatis menjalankan generate.
-echo "📦 Menginstall dependencies & generating prisma client..."
-npm install || { echo "❌ Install gagal"; exit 1; }
-
-# 4. Build Project (TypeScript to JavaScript)
+# 4. Build Worker (TypeScript to JavaScript)
 echo "🏗️ Membangun project worker (dist)..."
 npm run build || { echo "❌ Build gagal"; exit 1; }
 
-# 5. Eksekusi Restart dengan Explicit Node Args (1GB Limit)
-echo "♻️ Me-restart service uWA dengan limit heap ${MEMORY_LIMIT}MB..."
+# 5. Kembali ke root & restart via ecosystem.config.js
+cd ..
 
-# Menghapus proses lama agar flag baru terpasang bersih di PM2
+echo "♻️ Me-restart service uWA..."
 pm2 delete $PROJECT_NAME || true
+pm2 start ecosystem.config.js
 
-# Menjalankan engine dengan limitasi memori 1GB
-# max-old-space-size mengatur heap memory Node.js
-# max-memory-restart memerintahkan PM2 untuk restart jika melebihi limit
-# Kita juga memastikan environment variable termuat (PM2 biasanya memuat .env jika ada di folder sama)
-# Namun karena kita run dist/index.js, CWD adalah worker/, jadi worker/.env akan terbaca oleh dotenv.
-pm2 start dist/index.js \
-  --name $PROJECT_NAME \
-  --node-args="--max-old-space-size=$MEMORY_LIMIT" \
-  --max-memory-restart "${MEMORY_LIMIT}M"
-
-# 6. Finalisasi & Verifikasi
+# 6. Finalisasi
 echo "🧹 Menyimpan konfigurasi PM2..."
 pm2 save
 
 echo "-------------------------------------------------------"
 echo "✅ Deployment uWA Selesai! Status Worker saat ini:"
 echo "-------------------------------------------------------"
-
-# Menampilkan daftar proses untuk verifikasi penggunaan RAM
 pm2 list
-
-echo "-------------------------------------------------------"
-echo "Engine uWA berjalan dengan limit heap $MEMORY_LIMIT MB (1GB)."

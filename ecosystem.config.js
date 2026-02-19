@@ -1,15 +1,17 @@
 module.exports = {
     apps: [
         {
-            name: "uwa-worker",
-            script: "./worker/dist/index.js",
-            instances: 1,
+            name: 'uwa-worker',
+            script: './worker/dist/index.js',
+            interpreter: 'node',
+            node_args: '--max-old-space-size=1024',
+            max_memory_restart: '1024M',
             autorestart: true,
             watch: false,
-            max_memory_restart: "1024M",
             env: {
-                NODE_ENV: "production",
+                NODE_ENV: 'production',
             },
+            cwd: './'
         }
     ],
 };
