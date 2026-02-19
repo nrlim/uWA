@@ -201,18 +201,11 @@ async function logAntiBanAction(broadcastId: string, action: string, detail: str
 // ============================================================================
 
 const RATE_LIMIT_PATTERNS = [
-    'rate',
     'rate-overlimit',
     'too many',
     'spam',
     'blocked',
     'banned',
-    '405',
-    '429',
-    'connection closed',
-    'connection closed by peer',
-    'stream:error',
-    'conflict',
 ];
 
 function isRateLimitError(error: any): boolean {
@@ -375,7 +368,7 @@ async function connectToWhatsApp() {
         syncFullHistory: false,
     });
 
-    globalSock = sock;
+    // NOTE: globalSock is only set when connection is 'open' (see below)
 
     sock.ev.on('creds.update', saveCreds);
 
@@ -442,7 +435,7 @@ async function connectToWhatsApp() {
                 const reconnectDelay = randomInt(3000, 10000);
                 console.log(`Reconnecting in ${reconnectDelay / 1000}s...`);
                 await wait(reconnectDelay);
-                connectToWhatsApp();
+                await connectToWhatsApp();
             }
         } else if (connection === 'open') {
             console.log('Connection opened successfully.');
@@ -453,12 +446,40 @@ async function connectToWhatsApp() {
             // Start the presence heartbeat for active user simulation
             startPresenceHeartbeat();
 
-            const ownerId = await getWorkerUserId();
-            await prisma.instance.upsert({
-                where: { name: WORKER_INSTANCE_NAME },
-                update: { status: 'CONNECTED', qrCode: '' },
-                create: { name: WORKER_INSTANCE_NAME, status: 'CONNECTED', qrCode: '', user: { connect: { id: ownerId } } },
-            });
+            // Update instance status in DB — critical for frontend to show "CONNECTED"
+            try {
+                const ownerId = await getWorkerUserId();
+                await prisma.instance.upsert({
+                    where: { name: WORKER_INSTANCE_NAME },
+                    update: { status: 'CONNECTED', qrCode: '' },
+                    create: { name: WORKER_INSTANCE_NAME, status: 'CONNECTED', qrCode: '', user: { connect: { id: ownerId } } },
+                });
+                console.log('[DB] ✅ Instance status updated to CONNECTED.');
+            } catch (err) {
+                console.error('[DB] ❌ Upsert failed, trying fallback update:', err);
+                try {
+                    await prisma.instance.updateMany({
+                        where: { name: WORKER_INSTANCE_NAME },
+                        data: { status: 'CONNECTED', qrCode: '' },
+                    });
+                    console.log('[DB] ✅ Fallback update succeeded.');
+                } catch (err2) {
+                    console.error('[DB] ❌ Fallback update also failed:', err2);
+                }
+            }
+
+            // Resume any broadcasts that were paused due to disconnection
+            try {
+                const resumed = await prisma.broadcast.updateMany({
+                    where: { status: { in: ['PAUSED_RATE_LIMIT', 'PAUSED_WORKING_HOURS'] } },
+                    data: { status: 'RUNNING' },
+                });
+                if (resumed.count > 0) {
+                    console.log(`[RECONNECT] ♻️ Resumed ${resumed.count} paused broadcast(s).`);
+                }
+            } catch (err) {
+                console.error('[DB] Failed to resume paused broadcasts:', err);
+            }
         }
     });
 
