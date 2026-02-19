@@ -10,15 +10,17 @@ echo "🚀 Memulai Deployment uWA Worker..."
 echo "📥 Menarik kode terbaru dari repository..."
 git pull origin main || { echo "❌ Git pull gagal"; exit 1; }
 
-# 2. Install root dependencies & Generate Prisma Client dari root
-echo "📦 Menginstall root dependencies..."
-npm install || { echo "❌ Root install gagal"; exit 1; }
-
-echo "💎 Menghasilkan Prisma Client dari root schema..."
-npx prisma generate || { echo "❌ Prisma generate gagal"; exit 1; }
+# 2. Pastikan .env ada di root
+if [ ! -f ".env" ]; then
+    echo "❌ GAGAL: File .env tidak ditemukan di root!"
+    echo "   Buat file .env di /root/uWA/.env dengan DATABASE_URL dan DIRECT_URL"
+    exit 1
+fi
 
 # 3. Install worker dependencies
-echo "📦 Menginstall worker dependencies..."
+# postinstall otomatis menjalankan: npx prisma generate --schema=../prisma/schema.prisma
+# Ini memastikan Prisma Client di-generate ke worker/node_modules/@prisma/client
+echo "📦 Menginstall worker dependencies & generating prisma client..."
 cd $WORKER_DIR || { echo "❌ Folder $WORKER_DIR tidak ditemukan"; exit 1; }
 npm install || { echo "❌ Worker install gagal"; exit 1; }
 

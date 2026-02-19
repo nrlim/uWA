@@ -4,10 +4,12 @@
   "main": "dist/index.js",
   "type": "module",
   "scripts": {
-    "start": "node dist/index.js",
-    "dev": "tsc && node dist/index.js",
-    "build": "tsc",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "install:clean": "npm install --ignore-scripts",
+    "prisma:generate": "prisma generate --schema=../prisma/schema.prisma",
+    "build": "npm run prisma:generate && tsc",
+    "start": "node --max-old-space-size=1024 dist/index.js",
+    "restart": "pm2 restart uwa-worker",
+    "logs": "pm2 logs uwa-worker"
   },
   "keywords": [],
   "author": "",
