@@ -14,7 +14,7 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
 # 1. Update Source Code (reset local changes dulu agar tidak konflik)
 echo ""
 echo "📥 [1/6] Menarik kode terbaru dari repository..."
-git reset --hard HEAD
+#git reset --hard HEAD
 git pull origin main || { echo "❌ Git pull gagal"; exit 1; }
 
 # 2. Masuk ke direktori worker
