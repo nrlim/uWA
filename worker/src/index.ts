@@ -1,4 +1,6 @@
-import 'dotenv/config';
+import * as dotenv from 'dotenv';
+dotenv.config({ path: '.env' });
+
 import makeWASocket, { DisconnectReason, useMultiFileAuthState, Browsers } from '@whiskeysockets/baileys';
 import { Boom } from '@hapi/boom';
 import { PrismaClient } from '@prisma/client';
