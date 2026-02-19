@@ -10,14 +10,6 @@ module.exports = {
             env: {
                 NODE_ENV: "production",
             },
-        },
-        {
-            name: "uwa-web",
-            script: "npm",
-            args: "start",
-            env: {
-                NODE_ENV: "production",
-            },
-        },
+        }
     ],
 };
