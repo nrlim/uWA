@@ -1,8 +1,27 @@
 import { NextResponse } from 'next/server';
 import prisma from '@/lib/prisma';
+import { cookies } from 'next/headers';
+import jwt from 'jsonwebtoken';
+
+const JWT_SECRET = process.env.JWT_SECRET || 'fallback-secret-key-change-in-prod';
 
 export async function POST(req: Request) {
     try {
+        const cookieStore = await cookies();
+        const token = cookieStore.get('token')?.value;
+
+        if (!token) {
+            return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+        }
+
+        let userId: string;
+        try {
+            const decoded = jwt.verify(token, JWT_SECRET) as { userId: string };
+            userId = decoded.userId;
+        } catch (e) {
+            return NextResponse.json({ error: 'Invalid token' }, { status: 401 });
+        }
+
         const {
             name,
             message,
@@ -29,6 +48,7 @@ export async function POST(req: Request) {
                 dailyLimit: dailyLimit || 0,
                 workingHourStart: workingHourStart ?? 5,
                 workingHourEnd: workingHourEnd ?? 23,
+                user: { connect: { id: userId } }, // Link to the user
                 messages: {
                     create: recipients.map((r: string) => ({
                         recipient: r,
