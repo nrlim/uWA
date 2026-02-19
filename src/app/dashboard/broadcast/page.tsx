@@ -31,7 +31,8 @@ import {
     Layout,
     Clock,
     ShieldAlert,
-    Upload
+    Upload,
+    Trash2
 } from "lucide-react"
 import { useRouter } from "next/navigation"
 
@@ -46,6 +47,10 @@ export default function BroadcastPage() {
     const [contacts, setContacts] = useState<string[]>([])
     const [delayMin, setDelayMin] = useState(20)
     const [delayMax, setDelayMax] = useState(60)
+    const [imageFile, setImageFile] = useState<File | null>(null)
+    const [imagePreview, setImagePreview] = useState<string | null>(null)
+    const [uploadedImageUrl, setUploadedImageUrl] = useState<string | null>(null)
+    const [isUploadingImage, setIsUploadingImage] = useState(false)
     const [isSubmitting, setIsSubmitting] = useState(false)
     const [error, setError] = useState<string | null>(null)
     const [activeTab, setActiveTab] = useState("manual")
@@ -113,6 +118,136 @@ export default function BroadcastPage() {
         setMessage(prev => prev + tag + " ")
     }
 
+    const uploadImage = async (file: File) => {
+        setIsUploadingImage(true);
+        setError(null);
+        try {
+            const formData = new FormData();
+            formData.append('file', file);
+
+            // If replacing an existing image, send the old URL for cleanup
+            if (uploadedImageUrl) {
+                formData.append('oldUrl', uploadedImageUrl);
+            }
+
+            const res = await fetch('/api/upload', {
+                method: 'POST',
+                body: formData
+            });
+
+            if (!res.ok) throw new Error("Gagal mengupload gambar");
+
+            const data = await res.json();
+            setUploadedImageUrl(data.url);
+            console.log("Image uploaded:", data.url);
+        } catch (err: any) {
+            console.error(err);
+            setError("Gagal mengupload gambar: " + (err.message || "Unknown error"));
+            // Revert preview if upload fails
+            setImageFile(null);
+            setImagePreview(null);
+        } finally {
+            setIsUploadingImage(false);
+        }
+    }
+
+    const compressImage = (file: File): Promise<File> => {
+        return new Promise((resolve) => {
+            const reader = new FileReader();
+            reader.readAsDataURL(file);
+            reader.onload = (event) => {
+                const img = new Image();
+                img.src = event.target?.result as string;
+                img.onload = () => {
+                    const canvas = document.createElement('canvas');
+                    const MAX_WIDTH = 1200;
+                    let width = img.width;
+                    let height = img.height;
+
+                    if (width > MAX_WIDTH) {
+                        height *= MAX_WIDTH / width;
+                        width = MAX_WIDTH;
+                    }
+
+                    canvas.width = width;
+                    canvas.height = height;
+
+                    const ctx = canvas.getContext('2d');
+                    if (ctx) {
+                        ctx.drawImage(img, 0, 0, width, height);
+                        canvas.toBlob((blob) => {
+                            if (blob) {
+                                // Convert to JPEG with 0.7 quality
+                                const newFile = new File([blob], file.name.replace(/\.[^/.]+$/, "") + ".jpg", {
+                                    type: 'image/jpeg',
+                                    lastModified: Date.now()
+                                });
+                                resolve(newFile);
+                            } else {
+                                resolve(file);
+                            }
+                        }, 'image/jpeg', 0.7);
+                    } else {
+                        resolve(file);
+                    }
+                };
+                img.onerror = () => resolve(file);
+            };
+            reader.onerror = () => resolve(file);
+        });
+    }
+
+    const handleImageSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+        if (e.target.files && e.target.files[0]) {
+            let file = e.target.files[0]
+            if (file.size > 5 * 1024 * 1024) {
+                setError("Ukuran gambar maksimal 5MB.")
+                return
+            }
+
+            // Show preview immediately
+            const reader = new FileReader()
+            reader.onload = (e) => setImagePreview(e.target?.result as string)
+            reader.readAsDataURL(file)
+
+            setIsUploadingImage(true);
+
+            try {
+                // Compress logic
+                if (file.type.startsWith('image/')) {
+                    const compressed = await compressImage(file);
+                    // Use compressed if it's smaller (usually yes for 0.7 jpg)
+                    if (compressed.size < file.size) {
+                        console.log(`Compressed: ${(file.size / 1024).toFixed(0)}KB -> ${(compressed.size / 1024).toFixed(0)}KB`);
+                        file = compressed;
+                    }
+                }
+            } catch (err) {
+                console.warn("Compression warning:", err);
+            }
+
+            setImageFile(file)
+            await uploadImage(file);
+        }
+    }
+
+    const clearImage = async () => {
+        if (uploadedImageUrl) {
+            try {
+                // Call API to delete the file from bucket
+                const formData = new FormData();
+                formData.append('deleteUrl', uploadedImageUrl);
+                await fetch('/api/upload', { method: 'POST', body: formData });
+                console.log("Deleted image from bucket:", uploadedImageUrl);
+            } catch (e) {
+                console.error("Failed to delete image:", e);
+            }
+        }
+        setImageFile(null);
+        setImagePreview(null);
+        setUploadedImageUrl(null);
+    }
+
     // Handle Submit
     const handleSubmit = async () => {
         if (!contacts.length || !message) return
@@ -127,12 +262,21 @@ export default function BroadcastPage() {
         setError(null)
 
         try {
+            // Check if image is still uploading
+            if (isUploadingImage) {
+                setError("Sedang mengupload gambar, harap tunggu sebentar...");
+                setIsSubmitting(false);
+                return;
+            }
+
+            // Use the already uploaded URL (uploadedImageUrl is already in state)
             const res = await fetch("/api/broadcast", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
                     name,
                     message,
+                    imageUrl: uploadedImageUrl,
                     recipients: contacts,
                     delayMin: Number(delayMin),
                     delayMax: Number(delayMax)
@@ -238,6 +382,52 @@ export default function BroadcastPage() {
                                                     <option key={t.id} value={t.id}>{t.title}</option>
                                                 ))}
                                             </select>
+                                        </div>
+                                    )}
+                                </div>
+
+                                {/* Image Upload Area */}
+                                <div className="space-y-2">
+                                    <Label className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Media (Opsional)</Label>
+                                    {!imagePreview ? (
+                                        <div className="border border-dashed border-slate-300 rounded-xl h-20 flex items-center justify-center gap-3 bg-slate-50 hover:bg-slate-100 transition-colors cursor-pointer relative group">
+                                            <input
+                                                type="file"
+                                                accept="image/jpeg,image/png,image/jpg,.jpg,.jpeg,.png"
+                                                className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10"
+                                                onChange={handleImageSelect}
+                                                disabled={isLocked}
+                                            />
+                                            <div className="h-8 w-8 bg-blue-100 rounded-full flex items-center justify-center text-blue-600">
+                                                <Upload className="h-4 w-4" />
+                                            </div>
+                                            <div className="text-sm text-slate-600 font-medium">Upload Gambar (JPG/PNG) - Maks 5MB</div>
+                                        </div>
+                                    ) : (
+                                        <div className="relative border border-slate-200 rounded-xl overflow-hidden bg-slate-100 w-fit group">
+                                            <div className="relative">
+                                                <img src={imagePreview} alt="Preview" className={`h-32 w-auto object-cover transition-opacity ${isUploadingImage ? 'opacity-50' : 'opacity-100'}`} />
+                                                {isUploadingImage && (
+                                                    <div className="absolute inset-0 flex items-center justify-center">
+                                                        <Loader2 className="h-6 w-6 text-slate-800 animate-spin" />
+                                                    </div>
+                                                )}
+                                            </div>
+                                            {/* Delete Overlay */}
+                                            {!isUploadingImage && (
+                                                <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center gap-2">
+                                                    <button
+                                                        onClick={(e) => {
+                                                            e.preventDefault();
+                                                            clearImage();
+                                                        }}
+                                                        className="bg-red-500/80 hover:bg-red-600 p-2 rounded-full text-white backdrop-blur-sm transition-colors"
+                                                        title="Hapus Gambar"
+                                                    >
+                                                        <Trash2 className="h-4 w-4" />
+                                                    </button>
+                                                </div>
+                                            )}
                                         </div>
                                     )}
                                 </div>
@@ -463,11 +653,18 @@ export default function BroadcastPage() {
                                         </span>
                                     </div>
 
-                                    {message ? (
-                                        <div className="bg-white rounded-tr-none rounded-lg p-2.5 shadow-[0_1px_0.5px_rgba(0,0,0,0.13)] max-w-[85%] ml-auto relative break-words animate-in slide-in-from-right-2 duration-300">
-                                            <p className="text-[13.5px] text-[#111b21] leading-[19px] whitespace-pre-wrap">
-                                                {message.replace(/\{([^{}]+)\}/g, (match, content) => content.split('|')[0])}
-                                            </p>
+                                    {message || imagePreview ? (
+                                        <div className="bg-white rounded-tr-none rounded-lg p-1 shadow-[0_1px_0.5px_rgba(0,0,0,0.13)] max-w-[85%] ml-auto relative break-words animate-in slide-in-from-right-2 duration-300">
+                                            {imagePreview && (
+                                                <div className="mb-1 rounded-lg overflow-hidden relative">
+                                                    <img src={imagePreview} alt="Sent Media" className="w-full h-auto object-cover max-h-[200px]" />
+                                                </div>
+                                            )}
+                                            <div className="px-1.5 pb-1">
+                                                <p className="text-[13.5px] text-[#111b21] leading-[19px] whitespace-pre-wrap">
+                                                    {message.replace(/\{([^{}]+)\}/g, (match, content) => content.split('|')[0])}
+                                                </p>
+                                            </div>
                                             <div className="flex justify-end items-center gap-1 mt-1 opacity-60">
                                                 <span className="text-[10px] text-slate-500">{new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
                                                 <CheckCircle2 className="h-2.5 w-2.5 text-[#53bdeb]" />

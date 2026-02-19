@@ -40,6 +40,7 @@ model Broadcast {
   workingHourEnd    Int       @default(23)     // 23:00 (Human Clock: sleep 23–05)
   userId            String
   user              User      @relation(fields: [userId], references: [id])
+  imageUrl          String?   // Optional image for the broadcast
   messages          Message[]
   logs              BroadcastLog[]
 }
@@ -53,6 +54,7 @@ model Message {
   status          String    @default("PENDING") // PENDING, SENT, FAILED
   error           String?
   sentAt          DateTime?
+  imageUrl        String?   // Copy from broadcast or per-user override in future
   broadcast       Broadcast @relation(fields: [broadcastId], references: [id])
 }
 

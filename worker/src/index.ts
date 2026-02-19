@@ -4,6 +4,8 @@ import makeWASocket, { DisconnectReason, useMultiFileAuthState, Browsers } from 
 import { Boom } from '@hapi/boom';
 import { PrismaClient } from '@prisma/client';
 import pino from 'pino';
+import * as fs from 'fs';
+import * as path from 'path';
 
 // ============================================================================
 // INITIALIZATION
@@ -43,6 +45,10 @@ let haltReason = '';
 
 // Presence heartbeat interval reference (for cleanup)
 let presenceHeartbeatInterval: ReturnType<typeof setInterval> | null = null;
+
+// Media Cache (Download once per campaign)
+let cachedBroadcastId: string | null = null;
+let cachedMediaBuffer: Buffer | null = null;
 
 // ============================================================================
 // 1. UTILITY — Delay / Wait
@@ -495,10 +501,10 @@ async function connectToWhatsApp() {
  * Recipients will see "Typing..." indicator before the message arrives.
  * Returns the actual typing duration used (for anti_banned_meta logging).
  */
-async function simulateTyping(jid: string, broadcastId: string): Promise<number> {
+async function simulateTyping(jid: string, broadcastId: string, minMs: number = 3000, maxMs: number = 7000): Promise<number> {
     if (!globalSock) return 0;
 
-    const typingDuration = randomInt(3000, 7000);
+    const typingDuration = randomInt(minMs, maxMs);
 
     try {
         // Subscribe to presence first (required for composing to show)
@@ -802,7 +808,12 @@ async function startBroadcastProcessor() {
             await logAntiBanAction(broadcast.id, 'UNIQUE_SUFFIX', zwSuffix);
 
             // ── Simulate Typing (3–7 seconds) ─────────────────
-            const typingDurationMs = await simulateTyping(jid, broadcast.id);
+            // ── Simulate Typing (3–7s normally, +2-4s for media) ──
+            const hasMedia = !!(broadcast as any).imageUrl;
+            const typingMin = hasMedia ? 5000 : 3000;
+            const typingMax = hasMedia ? 11000 : 7000;
+
+            const typingDurationMs = await simulateTyping(jid, broadcast.id, typingMin, typingMax);
 
             // ── Calculate Delay (will use after send) ─────────
             const minDelay = (broadcast.delayMin || 20) * 1000;
@@ -819,17 +830,81 @@ async function startBroadcastProcessor() {
                 dailyIndex: dailySentCount + 1,
                 memoryMB: checkMemoryUsage().usedMB,
                 timestamp: new Date().toISOString(),
+                hasMedia,
             };
 
             // ── Send Message ──────────────────────────────────
-            console.log(`📤 Sending to ${jid} [batch #${antiBannedMeta.batchIndex}]...`);
+            console.log(`📤 Sending to ${jid} [batch #${antiBannedMeta.batchIndex}]${hasMedia ? ' + 🖼️ Media' : ''}...`);
 
             try {
                 if (!globalSock) {
                     throw new Error('Socket disconnected before send');
                 }
 
-                await globalSock.sendMessage(jid, { text: finalContent });
+                if (hasMedia) {
+                    const imageUrl = (broadcast as any).imageUrl;
+                    let mediaPayload: any = { url: imageUrl };
+
+                    // Optimization: Try to read from local disk to save bandwidth/download time
+                    // URL is like /uploads/filename.jpg
+                    if (cachedBroadcastId !== broadcast.id) {
+                        cachedBroadcastId = broadcast.id;
+                        cachedMediaBuffer = null;
+                        console.log(`[CACHE] New broadcast ${broadcast.id} — clearing media cache.`);
+                    }
+
+                    if (!cachedMediaBuffer) {
+                        // Optimization: Try to read from local disk to save bandwidth/download time
+                        // URL is like /uploads/filename.jpg
+                        if (imageUrl.startsWith('/')) {
+                            // Try resolving in current dir (e.g. running from root)
+                            let localPath = path.join(process.cwd(), 'public', imageUrl);
+
+                            // If not found, try parent dir (e.g. running from /worker)
+                            if (!fs.existsSync(localPath)) {
+                                localPath = path.join(process.cwd(), '../public', imageUrl);
+                            }
+
+                            if (fs.existsSync(localPath)) {
+                                cachedMediaBuffer = fs.readFileSync(localPath);
+                                console.log('[MEDIA] Loaded into memory from local file:', localPath);
+                            } else {
+                                console.warn('[MEDIA] Local file not found:', imageUrl);
+                            }
+                        } else if (imageUrl.startsWith('http')) {
+                            // Remote URL (Supabase or other) — download once
+                            try {
+                                console.log('[MEDIA] Downloading from remote URL:', imageUrl);
+                                const res = await fetch(imageUrl);
+                                if (res.ok) {
+                                    const arrayBuffer = await res.arrayBuffer();
+                                    cachedMediaBuffer = Buffer.from(arrayBuffer);
+                                    console.log(`[MEDIA] Downloaded and cached ${cachedMediaBuffer.length} bytes.`);
+                                } else {
+                                    console.error('[MEDIA] Failed to download media:', res.statusText);
+                                }
+                            } catch (err) {
+                                console.error('[MEDIA] Error downloading media:', err);
+                            }
+                        }
+                    } else {
+                        // console.log('[MEDIA] Using cached buffer');
+                    }
+
+                    if (cachedMediaBuffer) {
+                        mediaPayload = cachedMediaBuffer;
+                    }
+
+                    // Fallback to URL if cache failed (Baileys might fetch it, or it might be null/invalid if local file missing)
+                    // If mediaPayload is still { url: ... }, Baileys handles it.
+
+                    await globalSock.sendMessage(jid, {
+                        image: mediaPayload,
+                        caption: finalContent
+                    });
+                } else {
+                    await globalSock.sendMessage(jid, { text: finalContent });
+                }
 
                 await prisma.message.update({
                     where: { id: messageTask.id },

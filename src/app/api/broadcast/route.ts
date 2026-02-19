@@ -31,6 +31,7 @@ export async function POST(req: Request) {
             dailyLimit,
             workingHourStart,
             workingHourEnd,
+            imageUrl, // Get from request
         } = await req.json();
 
         if (!recipients || !Array.isArray(recipients) || recipients.length === 0) {
@@ -41,6 +42,7 @@ export async function POST(req: Request) {
             data: {
                 name,
                 message,
+                imageUrl, // Save into DB
                 status: 'PENDING',
                 total: recipients.length,
                 delayMin: delayMin || 20,
@@ -52,7 +54,8 @@ export async function POST(req: Request) {
                 messages: {
                     create: recipients.map((r: string) => ({
                         recipient: r,
-                        status: 'PENDING'
+                        status: 'PENDING',
+                        imageUrl, // Store in message for redundancy if needed
                     }))
                 }
             }
