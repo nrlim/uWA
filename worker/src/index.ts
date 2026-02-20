@@ -443,19 +443,16 @@ async function connectInstance(instanceId: string): Promise<void> {
     console.log(`[Connection] Using WA v${version.join('.')} (isLatest: ${isLatest}) for ${instanceId}`);
 
     // ── Browser identity + socket options ──
-    // IMPORTANT: syncFullHistory MUST be true for WhatsApp to accept macOS/Desktop companions.
-    // Without it, the mobile app rejects the pairing with "check your phone internet connection".
+    // Use Web protocol to avoid heavy mobile history sync chunk timeouts
     const sock = makeWASocket({
         version,
         auth: state,
         logger: pino({ level: 'silent' }) as any, // Prevent verbose disk I/O and memory explosion
-        browser: Browsers.macOS('Desktop'),
-        syncFullHistory: true,
+        browser: ['Ubuntu', 'Chrome', '111.0'],
+        syncFullHistory: false,
         connectTimeoutMs: 60_000,
         defaultQueryTimeoutMs: 60_000,
         keepAliveIntervalMs: 30_000,
-        markOnlineOnConnect: false, // Wait until fully connected before sending online presence
-        patchMessageBeforeSending: true as any,
         printQRInTerminal: false,
         getMessage: async () => undefined,
     });
