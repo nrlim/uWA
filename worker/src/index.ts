@@ -1,6 +1,6 @@
 import 'dotenv/config';
 
-import makeWASocket, { DisconnectReason, useMultiFileAuthState, Browsers } from '@whiskeysockets/baileys';
+import makeWASocket, { DisconnectReason, useMultiFileAuthState, Browsers, fetchLatestBaileysVersion } from '@whiskeysockets/baileys';
 import { Boom } from '@hapi/boom';
 import { PrismaClient } from '@prisma/client';
 import pino from 'pino';
@@ -29,6 +29,8 @@ interface SocketEntry {
     qrTimeout: ReturnType<typeof setTimeout> | null;
     qrAttempts: number;
     presenceInterval: ReturnType<typeof setTimeout> | null;
+    connectionFailures: number;
+    lastBroadcastActivity: number;
 }
 
 const socketPool: Map<string, SocketEntry> = new Map();
@@ -89,9 +91,10 @@ function validateCredsFile(instanceId: string): boolean {
     const sessionPath = getSessionPath(instanceId);
     const credsPath = path.join(sessionPath, 'creds.json');
 
+    console.log(`[SESSION] Checking for presence of creds.json specifically at ${credsPath}`);
     if (!fs.existsSync(credsPath)) {
         console.log(`[SESSION] creds.json absent for ${instanceId} — fresh session will be created.`);
-        return true; // No creds file = fresh start, which is fine
+        return true; // No creds file = fresh start
     }
 
     try {
@@ -436,16 +439,23 @@ async function connectInstance(instanceId: string): Promise<void> {
     }
 
     const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
+    const { version, isLatest } = await fetchLatestBaileysVersion();
+    console.log(`[Connection] Using WA v${version.join('.')} (isLatest: ${isLatest}) for ${instanceId}`);
 
     // ── Browser identity + socket options ──
     // IMPORTANT: syncFullHistory MUST be true for WhatsApp to accept macOS/Desktop companions.
     // Without it, the mobile app rejects the pairing with "check your phone internet connection".
     const sock = makeWASocket({
+        version,
         auth: state,
-        logger: pino({ level: 'warn' }) as any,
+        logger: pino({ level: 'silent' }) as any, // Prevent verbose disk I/O and memory explosion
         browser: Browsers.macOS('Desktop'),
         syncFullHistory: true,
         connectTimeoutMs: 60_000,
+        defaultQueryTimeoutMs: 60_000,
+        keepAliveIntervalMs: 30_000,
+        markOnlineOnConnect: false, // Wait until fully connected before sending online presence
+        patchMessageBeforeSending: true as any,
         printQRInTerminal: false,
         getMessage: async () => undefined,
     });
@@ -457,6 +467,8 @@ async function connectInstance(instanceId: string): Promise<void> {
         qrTimeout: null,
         qrAttempts: 0,
         presenceInterval: null,
+        connectionFailures: 0,
+        lastBroadcastActivity: Date.now(),
     };
     socketPool.set(instanceId, poolEntry);
 
@@ -475,6 +487,19 @@ async function connectInstance(instanceId: string): Promise<void> {
             if (entry) {
                 entry.qrAttempts++;
                 console.log(`[Connection] QR Received for Instance: ${instanceId} (attempt #${entry.qrAttempts})`);
+
+                // Give up immediately if too many attempts (6 attempts = ~120 seconds) to prevent frozen states
+                if (entry.qrAttempts >= 6) {
+                    console.log(`[Connection] ⚠️ QR not scanned after ${entry.qrAttempts} attempts for ${instanceId}. Closing for retry to save memory.`);
+                    await cleanupSocketForInstance(instanceId, 'qr_timeout_max_attempts');
+                    try {
+                        await prisma.instance.update({
+                            where: { id: instanceId },
+                            data: { status: 'DISCONNECTED', qrCode: '' },
+                        });
+                    } catch { /* ignore */ }
+                    return; // Stop further processing
+                }
 
                 // Clear previous QR timeout
                 if (entry.qrTimeout) {
@@ -500,8 +525,8 @@ async function connectInstance(instanceId: string): Promise<void> {
 
                     console.log(`[Connection] ⏰ QR timeout (${QR_TIMEOUT_MS / 1000}s) for ${instanceId}. Attempt #${currentEntry.qrAttempts}`);
 
-                    // After 5 failed attempts (5 QR cycles), close and retry cleanly
-                    if (currentEntry.qrAttempts >= 5) {
+                    // After 6 failed attempts (6 QR cycles), close and retry cleanly
+                    if (currentEntry.qrAttempts >= 6) {
                         console.log(`[Connection] ⚠️ QR not scanned after ${currentEntry.qrAttempts} attempts for ${instanceId}. Closing for retry.`);
 
                         await cleanupSocketForInstance(instanceId, 'qr_timeout_max_attempts');
@@ -515,18 +540,21 @@ async function connectInstance(instanceId: string): Promise<void> {
 
                         // The connection manager will pick this up and retry automatically
                     }
-                    // < 5 attempts: Baileys will auto-generate new QR
+                    // < 6 attempts: Baileys will auto-generate new QR
                 }, QR_TIMEOUT_MS);
             }
         }
 
-        // ── Connection Closed ─────────────────────────────────
         if (connection === 'close') {
             const statusCode = (lastDisconnect?.error as Boom)?.output?.statusCode;
             const errorMessage = ((lastDisconnect?.error as Boom)?.message || '').toLowerCase();
+            const payload = (lastDisconnect?.error as Boom)?.output?.payload;
             let shouldReconnect = statusCode !== DisconnectReason.loggedOut;
 
             console.log(`[Connection] ❌ Connection closed for ${instanceId} (code: ${statusCode}, msg: ${errorMessage})`);
+            if (payload) {
+                console.log(`[Connection] Exact rejection reason for ${instanceId}:`, JSON.stringify(payload));
+            }
 
             // ── Task 2: Bad session detection ──
             // These status codes indicate the session state is corrupted or rejected by WhatsApp.
@@ -534,8 +562,8 @@ async function connectInstance(instanceId: string): Promise<void> {
             // 440 = Session replaced on another device, 500+ = server-side rejection.
             const BAD_SESSION_CODES = [401, 408, 440];
             const isBadSession =
-                BAD_SESSION_CODES.includes(statusCode) ||
-                statusCode >= 500 ||
+                BAD_SESSION_CODES.includes(statusCode as number) ||
+                (statusCode as number) >= 500 ||
                 errorMessage.includes('bad session') ||
                 errorMessage.includes('connection failure') ||
                 errorMessage.includes('stream errored') ||
@@ -552,6 +580,20 @@ async function connectInstance(instanceId: string): Promise<void> {
                 console.log(`[Connection] ⚠️ Bad session detected for ${instanceId} (code: ${statusCode}). Purging session folder for clean re-pair...`);
                 deleteSessionFolder(instanceId);
                 shouldReconnect = true;
+            }
+            // Strict rule: Connection lost or timed out > 3 times
+            else if (statusCode === DisconnectReason.connectionLost || statusCode === DisconnectReason.timedOut) {
+                const entry = socketPool.get(instanceId);
+                if (entry) {
+                    entry.connectionFailures++;
+                    console.log(`[Connection] ⚠️ Connection lost/timed out for ${instanceId} (Attempt ${entry.connectionFailures}/3)...`);
+                    if (entry.connectionFailures > 3) {
+                        console.log(`[Connection] ⚠️ Connection failed > 3 times. Deleting session for ${instanceId} and reverting to DISCONNECTED.`);
+                        deleteSessionFolder(instanceId);
+                        shouldReconnect = false; // Will revert to DISCONNECTED via below logic
+                        entry.connectionFailures = 0;
+                    }
+                }
             }
 
             await cleanupSocketForInstance(instanceId, `connection_close_${statusCode}`);
@@ -592,10 +634,13 @@ async function connectInstance(instanceId: string): Promise<void> {
 
             // Clear QR timeout
             const entry = socketPool.get(instanceId);
-            if (entry?.qrTimeout) {
-                clearTimeout(entry.qrTimeout);
-                entry.qrTimeout = null;
+            if (entry) {
+                if (entry.qrTimeout) {
+                    clearTimeout(entry.qrTimeout);
+                    entry.qrTimeout = null;
+                }
                 entry.qrAttempts = 0;
+                entry.connectionFailures = 0; // Reset consecutive connection failures
             }
 
             broadcastHalted = false;
@@ -652,13 +697,30 @@ async function startConnectionManager(): Promise<void> {
 
     while (true) {
         try {
+            // Memory Optimization: close sockets idle for > 1 hour
+            const IDLE_TIMEOUT_MS = 60 * 60 * 1000;
+            const now = Date.now();
+            for (const [id, entry] of socketPool.entries()) {
+                if (now - entry.lastBroadcastActivity > IDLE_TIMEOUT_MS) {
+                    console.log(`[MEMORY GUARD] Socket ${id} idle for 1 hour. Closing to save memory.`);
+                    await cleanupSocketForInstance(id, 'idle_timeout');
+                    try {
+                        await prisma.instance.update({
+                            where: { id: id },
+                            data: { status: 'DISCONNECTED', qrCode: '' },
+                        });
+                    } catch { }
+                }
+            }
+
             // Find all instances that are DISCONNECTED and not already in our socket pool
             const disconnectedInstances = await prisma.instance.findMany({
                 where: {
                     status: 'DISCONNECTED',
                     users: { some: {} } // Only instances that have at least 1 user linked
                 },
-                select: { id: true, phoneNumber: true }
+                select: { id: true, phoneNumber: true },
+                take: 5 // Process max 5 at a time to prevent CPU/IO spikes during connection bursts
             });
 
             // Diagnostic: log scan results
@@ -803,7 +865,7 @@ async function startBroadcastProcessor() {
         try {
             // ── Memory Check ──────────────────────────────────
             const mem = checkMemoryUsage();
-            if (!mem.ok) {
+            if (mem.usedMB > 850) {
                 console.warn(`[MEMORY] ⚠️ High usage: ${mem.usedMB}MB / ${MEMORY_LIMIT_MB}MB`);
                 if (global.gc) {
                     global.gc();
@@ -862,6 +924,11 @@ async function startBroadcastProcessor() {
                 console.warn(`[BROADCAST] No socket for instance ${broadcast.instanceId}. Skipping.`);
                 await wait(5000);
                 continue;
+            }
+
+            const entry = socketPool.get(broadcast.instanceId);
+            if (entry) {
+                entry.lastBroadcastActivity = Date.now();
             }
 
             // ── Campaign Global Timeout ──────────────────────────
@@ -1027,8 +1094,9 @@ async function startBroadcastProcessor() {
 
             // ── Simulate Typing ───────────────────────────────
             const hasMedia = !!(broadcast as any).imageUrl;
-            const typingMin = hasMedia ? 5000 : 3000;
-            const typingMax = hasMedia ? 11000 : 7000;
+            const baseTyping = spintaxResult.length * 50; // 50ms per character
+            const typingMin = hasMedia ? 5000 + baseTyping : Math.max(3000, baseTyping);
+            const typingMax = typingMin + 3000;
             const typingDurationMs = await simulateTyping(activeSock, jid, broadcast.id, typingMin, typingMax);
 
             // ── Calculate Delay ───────────────────────────────
