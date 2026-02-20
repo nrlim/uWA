@@ -35,22 +35,17 @@ interface SocketEntry {
     presenceInterval: ReturnType<typeof setTimeout> | null;
     connectionFailures: number;
     lastBroadcastActivity: number;
+
+    // Per-instance state for multi-tenant isolation
+    batchMessageCount: number;
+    dailySentCount: number;
+    lastActiveTime: number;
+    lastDailyResetDate: string;
+    mediaCache: { broadcastId: string, buffer: Buffer, url: string } | null;
+    isProcessing: boolean;
 }
 
 const socketPool: Map<string, SocketEntry> = new Map();
-
-// Track idle time and timeouts
-let lastActiveTime = Date.now();
-let lastBroadcastId: string | null = null;
-let broadcastStartTime = 0;
-let batchMessageCount = 0;
-let dailySentCount = 0;
-let lastDailyResetDate = new Date().toDateString();
-
-// Media Cache (Download once per campaign)
-let cachedBroadcastId: string | null = null;
-let cachedImageUrl: string | null = null;
-let cachedMediaBuffer: Buffer | null = null;
 
 // ============================================================================
 // 1. UTILITY
@@ -219,18 +214,18 @@ function msUntilWorkingHoursStart(startHour: number): number {
 // 5. DAILY LIMIT
 // ============================================================================
 
-function resetDailyCounterIfNeeded(): void {
+function resetDailyCounterIfNeeded(entry: SocketEntry): void {
     const today = new Date().toDateString();
-    if (today !== lastDailyResetDate) {
-        dailySentCount = 0;
-        lastDailyResetDate = today;
-        console.log('[ANTI-BAN] Daily counter reset for new day.');
+    if (today !== entry.lastDailyResetDate) {
+        entry.dailySentCount = 0;
+        entry.lastDailyResetDate = today;
+        console.log(`[ANTI-BAN][${entry.instanceId}] Daily counter reset for new day.`);
     }
 }
 
-function isDailyLimitReached(dailyLimit: number): boolean {
+function isDailyLimitReached(entry: SocketEntry, dailyLimit: number): boolean {
     if (dailyLimit <= 0) return false;
-    return dailySentCount >= dailyLimit;
+    return entry.dailySentCount >= dailyLimit;
 }
 
 // ============================================================================
@@ -502,6 +497,12 @@ async function connectInstance(instanceId: string): Promise<void> {
         presenceInterval: null,
         connectionFailures: previousFailures,
         lastBroadcastActivity: Date.now(),
+        batchMessageCount: 0,
+        dailySentCount: 0,
+        lastActiveTime: Date.now(),
+        lastDailyResetDate: new Date().toDateString(),
+        mediaCache: null,
+        isProcessing: false
     };
     socketPool.set(instanceId, poolEntry);
 
@@ -755,9 +756,6 @@ async function connectInstance(instanceId: string): Promise<void> {
                 }
                 entry.qrAttempts = 0;
                 entry.connectionFailures = 0; // Reset consecutive connection failures
-            }
-
-            if (entry) {
                 entry.isPaused = false;
                 entry.pauseReason = '';
             }
@@ -793,6 +791,11 @@ async function connectInstance(instanceId: string): Promise<void> {
             } catch (err) {
                 console.error(`[Connection] Failed to resume broadcasts for ${instanceId}:`, err);
             }
+
+            // Trigger parallel processor for this instance
+            processBroadcastForInstance(instanceId).catch(err => {
+                console.error(`[PROCESSOR] Fatal error in loop for ${instanceId}:`, err);
+            });
         }
     });
 }
@@ -813,22 +816,6 @@ async function startConnectionManager(): Promise<void> {
 
     while (true) {
         try {
-            // Memory Optimization: close sockets idle for > 1 hour
-            const IDLE_TIMEOUT_MS = 60 * 60 * 1000;
-            const now = Date.now();
-            for (const [id, entry] of socketPool.entries()) {
-                if (now - entry.lastBroadcastActivity > IDLE_TIMEOUT_MS) {
-                    console.log(`[MEMORY GUARD] Socket ${id} idle for 1 hour. Closing to save memory.`);
-                    await cleanupSocketForInstance(id, 'idle_timeout');
-                    try {
-                        await prisma.instance.update({
-                            where: { id: id },
-                            data: { status: 'DISCONNECTED', qrCode: '' },
-                        });
-                    } catch { }
-                }
-            }
-
             // Find all instances that are INITIALIZING that need a connection
             const candidates = await prisma.instance.findMany({
                 where: {
@@ -839,7 +826,7 @@ async function startConnectionManager(): Promise<void> {
                 take: 5 // Process max 5 at a time to prevent CPU/IO spikes during connection bursts
             });
 
-            // Diagnostic: log scan results
+            // Diagnostic: log scan results only when candidates found
             if (candidates.length > 0) {
                 console.log(`[CONNECTION MANAGER] Scan: ${candidates.length} candidate(s) found. Pool Size: ${socketPool.size}`);
             }
@@ -902,7 +889,8 @@ async function startConnectionManager(): Promise<void> {
 // 14. COMPOSING PRESENCE
 // ============================================================================
 
-async function simulateTyping(sock: any, jid: string, broadcastId: string, minMs: number = 3000, maxMs: number = 7000): Promise<number> {
+async function simulateTyping(entry: SocketEntry, jid: string, broadcastId: string, minMs: number = 3000, maxMs: number = 7000): Promise<number> {
+    const sock = entry.sock;
     if (!sock) return 0;
 
     const typingDuration = randomInt(minMs, maxMs);
@@ -920,7 +908,7 @@ async function simulateTyping(sock: any, jid: string, broadcastId: string, minMs
         await wait(typingDuration);
         await sock.sendPresenceUpdate('paused', jid);
     } catch (err) {
-        console.warn('[TYPING] Presence update failed (non-fatal):', err);
+        console.warn(`[TYPING][${entry.instanceId}] Presence update failed (non-fatal):`, err);
     }
 
     return typingDuration;
@@ -934,28 +922,28 @@ const BATCH_COOLDOWN_EVERY = 15;
 const BATCH_COOLDOWN_MIN_MS = 120 * 1000;
 const BATCH_COOLDOWN_MAX_MS = 300 * 1000;
 
-async function applyBatchCoolingIfNeeded(broadcastId: string, sock: any): Promise<void> {
-    batchMessageCount++;
+async function applyBatchCoolingIfNeeded(entry: SocketEntry, broadcastId: string): Promise<void> {
+    entry.batchMessageCount++;
 
-    if (batchMessageCount >= BATCH_COOLDOWN_EVERY) {
+    if (entry.batchMessageCount >= BATCH_COOLDOWN_EVERY) {
         const cooldownMs = randomInt(BATCH_COOLDOWN_MIN_MS, BATCH_COOLDOWN_MAX_MS);
         const cooldownSec = Math.round(cooldownMs / 1000);
 
-        await logAntiBanAction(broadcastId, 'COOLDOWN', `Batch cooling: ${cooldownSec}s after ${batchMessageCount} messages`);
-        console.log(`[BATCH COOL] 🧊 ${cooldownSec}s rest after ${batchMessageCount} messages...`);
+        await logAntiBanAction(broadcastId, 'COOLDOWN', `Batch cooling: ${cooldownSec}s after ${entry.batchMessageCount} messages`);
+        console.log(`[BATCH COOL][${entry.instanceId}] 🧊 ${cooldownSec}s rest after ${entry.batchMessageCount} messages...`);
 
-        if (sock) {
-            try { await sock.sendPresenceUpdate('unavailable'); } catch { /* non-critical */ }
+        if (entry.sock) {
+            try { await entry.sock.sendPresenceUpdate('unavailable'); } catch { /* non-critical */ }
         }
 
         await wait(cooldownMs);
 
-        if (sock) {
-            try { await sock.sendPresenceUpdate('available'); } catch { /* non-critical */ }
+        if (entry.sock) {
+            try { await entry.sock.sendPresenceUpdate('available'); } catch { /* non-critical */ }
         }
 
-        batchMessageCount = 0;
-        console.log(`[BATCH COOL] ✅ Cooling complete. Resuming...`);
+        entry.batchMessageCount = 0;
+        console.log(`[BATCH COOL][${entry.instanceId}] ✅ Cooling complete. Resuming...`);
     }
 }
 
@@ -963,59 +951,47 @@ async function applyBatchCoolingIfNeeded(broadcastId: string, sock: any): Promis
 // 16. BROADCAST PROCESSOR — Multi-tenant aware
 // ============================================================================
 
-async function startBroadcastProcessor() {
-    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    console.log('🚀 Anti-Ban Broadcast Processor v4.1 (Multi-Tenant)');
-    console.log('   ├─ Browser Identity: Mac OS/Desktop ✓');
-    console.log('   ├─ syncFullHistory: true (Required for Pairing) ✓');
-    console.log('   ├─ creds.json Pre-Validation ✓');
-    console.log('   ├─ Bad Session Auto-Cleanup (401/408/440/5xx) ✓');
-    console.log('   ├─ Connect Timeout: 60s ✓');
-    console.log('   ├─ Dynamic Session Paths (auth-${instanceId}) ✓');
-    console.log('   ├─ Socket Pool / Connection Manager ✓');
-    console.log('   ├─ QR Timeout (60s auto-regenerate) ✓');
-    console.log('   ├─ Nested Spintax Engine ✓');
-    console.log('   ├─ Composing Presence (3–7s) ✓');
-    console.log('   ├─ Available Presence Heartbeat ✓');
-    console.log('   ├─ Zero-Width Invisible Suffix (1–5 chars) ✓');
-    console.log('   ├─ Batch Cooling (every 15 msgs → 120–300s) ✓');
-    console.log('   ├─ Human Clock (sleep 23:00–05:00) ✓');
-    console.log('   ├─ Daily Send Limits ✓');
-    console.log('   ├─ Rate-Limit Detection & Halt ✓');
-    console.log('   ├─ Session Pre-Validation ✓');
-    console.log('   ├─ anti_banned_meta Logging ✓');
-    console.log('   ├─ Socket Cleanup (SIGINT/SIGTERM) ✓');
-    console.log('   └─ Memory Monitor (1024MB) ✓');
-    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+async function processBroadcastForInstance(instanceId: string) {
+    const entry = socketPool.get(instanceId);
+    if (!entry || entry.isProcessing) return;
+    entry.isProcessing = true;
+
+    console.log(`[PROCESSOR][${instanceId}] Loop started.`);
 
     while (true) {
         try {
-            // ── Memory Check ──────────────────────────────────
-            const mem = checkMemoryUsage();
-            if (mem.usedMB > 850) {
-                console.warn(`[MEMORY] ⚠️ High usage: ${mem.usedMB}MB / ${MEMORY_LIMIT_MB}MB`);
-                if (global.gc) {
-                    global.gc();
-                    console.log('[MEMORY] Manual GC triggered.');
-                }
+            // ── Verify Loop Still Valid ──────────────────────────
+            const currentEntry = socketPool.get(instanceId);
+            if (!currentEntry) {
+                console.log(`[PROCESSOR][${instanceId}] Instance removed from pool. Loop exiting.`);
+                break;
             }
 
-            // ── Halt Check ────────────────────────────────────
-            // Removed globalHandshakePause logic to allow full multi-tenant non-blocking payload streaming
+            const activeSock = currentEntry.sock;
+            if (!activeSock) {
+                console.log(`[PROCESSOR][${instanceId}] Socket gone. Loop exiting.`);
+                break;
+            }
 
-            // ── Find Active Broadcast (across ALL connected instances) ──
-            // Only pick broadcasts whose instance has an active socket
-            const connectedInstanceIds = [...socketPool.keys()];
-
-            if (connectedInstanceIds.length === 0) {
-                await wait(5000);
+            if (currentEntry.isPaused) {
+                await wait(10000);
                 continue;
             }
 
+            // ── Memory Check ──────────────────────────────────
+            const mem = checkMemoryUsage();
+            if (mem.usedMB > 1500) {
+                console.warn(`[MEMORY][${instanceId}] ⚠️ High usage: ${mem.usedMB}MB / ${MEMORY_LIMIT_MB}MB`);
+                if (global.gc) {
+                    global.gc();
+                }
+            }
+
+            // ── Find Active Broadcast for THIS instance ──
             const broadcast = await prisma.broadcast.findFirst({
                 where: {
                     status: { in: ['PENDING', 'RUNNING'] },
-                    instanceId: { in: connectedInstanceIds },
+                    instanceId: instanceId,
                 },
                 orderBy: { updatedAt: 'asc' },
                 include: {
@@ -1027,56 +1003,22 @@ async function startBroadcastProcessor() {
                 },
             });
 
-            // ── Idle Auto-Refresh (5 minutes) ─────────────────
             if (!broadcast) {
-                const idleTime = Date.now() - lastActiveTime;
+                const idleTime = Date.now() - currentEntry.lastActiveTime;
                 if (idleTime > 5 * 60 * 1000) {
-                    console.log(`[AUTO-REFRESH] Worker idle for 5+ minutes. Restarting...`);
-                    await cleanupAllSockets('idle_refresh');
-                    process.exit(0); // PM2 restarts
+                    // console.log(`[PROCESSOR][${instanceId}] Idle for 5m. Waiting for new broadcasts...`);
                 }
-                await wait(5000);
+                await wait(10000);
                 continue;
             }
 
-            lastActiveTime = Date.now();
-
-            // ── Get the socket for THIS broadcast's instance ──
-            const activeSock = getSocket(broadcast.instanceId);
-            if (!activeSock) {
-                console.warn(`[BROADCAST] No socket for instance ${broadcast.instanceId}. Skipping.`);
-                await wait(5000);
-                continue;
-            }
-
-            const entry = socketPool.get(broadcast.instanceId);
-            if (!entry || entry.isPaused) {
-                console.warn(`[BROADCAST] Instance ${broadcast.instanceId} is paused or missing (${entry?.pauseReason}). Skipping.`);
-                await wait(5000);
-                continue;
-            }
-            entry.lastBroadcastActivity = Date.now();
-
-            // ── Campaign Global Timeout ──────────────────────────
-            if (lastBroadcastId !== broadcast.id) {
-                lastBroadcastId = broadcast.id;
-                broadcastStartTime = Date.now();
-            } else {
-                const maxCampaignDuration = 3 * 60 * 60 * 1000;
-                if (Date.now() - broadcastStartTime > maxCampaignDuration) {
-                    console.error(`[TIMEOUT] Broadcast ${broadcast.id} exceeded 3h timeout!`);
-                    if (entry) {
-                        entry.isPaused = true;
-                        entry.pauseReason = 'Campaign 3h timeout exceeded';
-                    }
-                    continue;
-                }
-            }
+            currentEntry.lastActiveTime = Date.now();
+            currentEntry.lastBroadcastActivity = Date.now();
 
             // ── Credit Check Guard ────────────────────────────
             if (broadcast.user.credit <= 0) {
                 await logAntiBanAction(broadcast.id, 'CREDIT_EXHAUSTED', `User ${broadcast.user.username} has 0 credits.`);
-                console.warn(`[CREDIT] ⛔ User ${broadcast.user.username} has 0 credits.`);
+                console.warn(`[CREDIT][${instanceId}] ⛔ User ${broadcast.user.username} has 0 credits.`);
                 await prisma.broadcast.update({
                     where: { id: broadcast.id },
                     data: { status: 'PAUSED_NO_CREDIT' }
@@ -1087,16 +1029,16 @@ async function startBroadcastProcessor() {
             // ── Session Validation (on first message of batch) ───
             if (broadcast.status === 'PENDING') {
                 const memStart = checkMemoryUsage();
-                console.log(`[LIFECYCLE] Starting broadcast "${broadcast.name}" on instance ${broadcast.instanceId}. Memory: ${memStart.usedMB}MB`);
+                console.log(`[LIFECYCLE][${instanceId}] Starting broadcast "${broadcast.name}". Memory: ${memStart.usedMB}MB`);
 
-                const sessionOk = await validateSessionForInstance(broadcast.instanceId);
+                const sessionOk = await validateSessionForInstance(instanceId);
                 await logAntiBanAction(
                     broadcast.id, 'SESSION_VALIDATE',
                     sessionOk ? 'Session healthy' : 'Session unhealthy'
                 );
 
                 if (!sessionOk) {
-                    console.warn('[SESSION] Session invalid. Delaying 10s...');
+                    console.warn(`[SESSION][${instanceId}] Session invalid. Delaying 10s...`);
                     await wait(10000);
                     continue;
                 }
@@ -1105,7 +1047,7 @@ async function startBroadcastProcessor() {
                     where: { id: broadcast.id },
                     data: { status: 'RUNNING' },
                 });
-                batchMessageCount = 0;
+                currentEntry.batchMessageCount = 0;
             }
 
             // ── Human Clock Gate ──────────────────────────────
@@ -1119,7 +1061,7 @@ async function startBroadcastProcessor() {
                 await logAntiBanAction(broadcast.id, 'WORKING_HOURS_PAUSE',
                     `SLEEP MODE: Outside hours (${workStart}:00-${workEnd}:00). Sleeping ~${sleepMin} min.`
                 );
-                console.log(`[HUMAN CLOCK] 🌙 Sleep Mode. Pausing ~${sleepMin} min...`);
+                console.log(`[HUMAN CLOCK][${instanceId}] 🌙 Sleep Mode. Pausing ~${sleepMin} min...`);
 
                 await prisma.broadcast.update({
                     where: { id: broadcast.id },
@@ -1131,7 +1073,7 @@ async function startBroadcastProcessor() {
                 const chunks = Math.ceil(sleepMs / 60000);
                 for (let i = 0; i < chunks; i++) {
                     await wait(Math.min(60000, sleepMs - i * 60000));
-                    if (entry?.isPaused) break;
+                    if (currentEntry?.isPaused) break;
                 }
 
                 try { await activeSock.sendPresenceUpdate('available'); } catch { /* */ }
@@ -1140,22 +1082,22 @@ async function startBroadcastProcessor() {
                     where: { id: broadcast.id },
                     data: { status: 'RUNNING' },
                 });
-                console.log(`[HUMAN CLOCK] ☀️ Waking up. Resuming.`);
+                console.log(`[HUMAN CLOCK][${instanceId}] ☀️ Waking up. Resuming.`);
                 continue;
             }
 
             // ── Daily Limit Gate ──────────────────────────────
-            resetDailyCounterIfNeeded();
+            resetDailyCounterIfNeeded(currentEntry);
             const dailyLimit = broadcast.dailyLimit ?? 0;
 
-            if (isDailyLimitReached(dailyLimit)) {
+            if (isDailyLimitReached(currentEntry, dailyLimit)) {
                 const sleepMs = msUntilWorkingHoursStart(workStart);
                 const sleepHrs = (sleepMs / 3600000).toFixed(1);
 
                 await logAntiBanAction(broadcast.id, 'COOLDOWN',
-                    `Daily limit reached (${dailySentCount}/${dailyLimit}). Pausing ~${sleepHrs}h.`
+                    `Daily limit reached (${currentEntry.dailySentCount}/${dailyLimit}). Pausing ~${sleepHrs}h.`
                 );
-                console.log(`[DAILY LIMIT] 📊 ${dailySentCount}/${dailyLimit}. Pausing ~${sleepHrs}h...`);
+                console.log(`[DAILY LIMIT][${instanceId}] 📊 ${currentEntry.dailySentCount}/${dailyLimit}. Pausing ~${sleepHrs}h...`);
 
                 await prisma.broadcast.update({
                     where: { id: broadcast.id },
@@ -1166,9 +1108,9 @@ async function startBroadcastProcessor() {
                 const totalChunks = Math.ceil(sleepMs / fiveMin);
                 for (let i = 0; i < totalChunks; i++) {
                     await wait(Math.min(fiveMin, sleepMs - i * fiveMin));
-                    resetDailyCounterIfNeeded();
-                    if (!isDailyLimitReached(dailyLimit)) break;
-                    if (entry?.isPaused) break;
+                    resetDailyCounterIfNeeded(currentEntry);
+                    if (!isDailyLimitReached(currentEntry, dailyLimit)) break;
+                    if (currentEntry?.isPaused) break;
                 }
 
                 await prisma.broadcast.update({
@@ -1188,19 +1130,17 @@ async function startBroadcastProcessor() {
 
                 if (remaining === 0) {
                     const memEnd = checkMemoryUsage();
-                    console.log(`[LIFECYCLE] Broadcast "${broadcast.name}" completed. Memory: ${memEnd.usedMB}MB`);
+                    console.log(`[LIFECYCLE][${instanceId}] Broadcast "${broadcast.name}" completed. Memory: ${memEnd.usedMB}MB`);
 
                     await prisma.broadcast.update({
                         where: { id: broadcast.id },
                         data: { status: 'COMPLETED' },
                     });
 
-                    batchMessageCount = 0;
-                    cachedMediaBuffer = null;
-                    cachedImageUrl = null;
-                    lastActiveTime = Date.now();
-                    lastBroadcastId = null;
-                    console.log(`[LIFECYCLE] Cleanup finished for "${broadcast.name}". Worker idle.`);
+                    currentEntry.batchMessageCount = 0;
+                    currentEntry.mediaCache = null;
+                    currentEntry.lastActiveTime = Date.now();
+                    console.log(`[LIFECYCLE][${instanceId}] Cleanup finished for "${broadcast.name}".`);
                 }
                 await wait(2000);
                 continue;
@@ -1226,7 +1166,7 @@ async function startBroadcastProcessor() {
             const baseTyping = spintaxResult.length * 50; // 50ms per character
             const typingMin = hasMedia ? 5000 + baseTyping : Math.max(3000, baseTyping);
             const typingMax = typingMin + 3000;
-            const typingDurationMs = await simulateTyping(activeSock, jid, broadcast.id, typingMin, typingMax);
+            const typingDurationMs = await simulateTyping(currentEntry, jid, broadcast.id, typingMin, typingMax);
 
             // ── Calculate Delay ───────────────────────────────
             const minDelay = (broadcast.delayMin || 20) * 1000;
@@ -1239,64 +1179,58 @@ async function startBroadcastProcessor() {
                 zwSuffix,
                 typingDurationMs,
                 delayAfterMs: delay,
-                batchIndex: batchMessageCount + 1,
-                dailyIndex: dailySentCount + 1,
+                batchIndex: currentEntry.batchMessageCount + 1,
+                dailyIndex: currentEntry.dailySentCount + 1,
                 memoryMB: checkMemoryUsage().usedMB,
                 timestamp: new Date().toISOString(),
                 hasMedia,
-                instanceId: broadcast.instanceId,
+                instanceId: instanceId,
             };
 
             // ── Send Message ──────────────────────────────────
-            console.log(`📤 [${broadcast.instanceId.slice(0, 8)}] Sending to ${jid} [batch #${antiBannedMeta.batchIndex}]${hasMedia ? ' + 🖼️' : ''}...`);
+            console.log(`📤 [${instanceId.slice(0, 8)}] Sending to ${jid} [batch #${antiBannedMeta.batchIndex}]${hasMedia ? ' + 🖼️' : ''}...`);
 
             let messageStatusUpdated = false;
             try {
-                if (!activeSock) {
-                    throw new Error('Socket disconnected before send');
-                }
-
                 if (hasMedia) {
                     const imageUrl = (broadcast as any).imageUrl;
                     let mediaPayload: any = { url: imageUrl };
 
-                    if (cachedBroadcastId !== broadcast.id || cachedImageUrl !== imageUrl) {
-                        cachedBroadcastId = broadcast.id;
-                        cachedImageUrl = imageUrl;
-                        cachedMediaBuffer = null;
-                        console.log(`[CACHE] New media for broadcast ${broadcast.id}`);
-                    }
+                    if (!currentEntry.mediaCache || currentEntry.mediaCache.broadcastId !== broadcast.id || currentEntry.mediaCache.url !== imageUrl) {
+                        console.log(`[CACHE][${instanceId}] New media for broadcast ${broadcast.id}`);
 
-                    if (!cachedMediaBuffer) {
+                        let buffer: Buffer | null = null;
                         if (imageUrl.startsWith('/')) {
                             let localPath = path.join(process.cwd(), 'public', imageUrl);
                             if (!fs.existsSync(localPath)) {
                                 localPath = path.join(process.cwd(), '../public', imageUrl);
                             }
                             if (fs.existsSync(localPath)) {
-                                cachedMediaBuffer = fs.readFileSync(localPath);
-                                console.log('[MEDIA] Loaded from local file:', localPath);
-                            } else {
-                                console.warn('[MEDIA] Local file not found:', imageUrl);
+                                buffer = fs.readFileSync(localPath);
+                                console.log(`[MEDIA][${instanceId}] Loaded from local file:`, localPath);
                             }
                         } else if (imageUrl.startsWith('http')) {
                             try {
-                                console.log('[MEDIA] Downloading:', imageUrl);
+                                console.log(`[MEDIA][${instanceId}] Downloading:`, imageUrl);
                                 const res = await fetch(imageUrl);
                                 if (res.ok) {
                                     const arrayBuffer = await res.arrayBuffer();
-                                    cachedMediaBuffer = Buffer.from(arrayBuffer);
-                                    console.log(`[MEDIA] Cached ${cachedMediaBuffer.length} bytes.`);
-                                } else {
-                                    console.error('[MEDIA] Download failed:', res.statusText);
+                                    buffer = Buffer.from(arrayBuffer);
+                                    console.log(`[MEDIA][${instanceId}] Cached ${buffer.length} bytes.`);
                                 }
                             } catch (err) {
-                                console.error('[MEDIA] Error:', err);
+                                console.error(`[MEDIA][${instanceId}] Download failed:`, err);
                             }
+                        }
+
+                        if (buffer) {
+                            currentEntry.mediaCache = { broadcastId: broadcast.id, url: imageUrl, buffer };
+                        } else {
+                            currentEntry.mediaCache = null;
                         }
                     }
 
-                    if (cachedMediaBuffer) mediaPayload = cachedMediaBuffer;
+                    if (currentEntry.mediaCache?.buffer) mediaPayload = currentEntry.mediaCache.buffer;
 
                     const sendPromise = activeSock.sendMessage(jid, { image: mediaPayload, caption: finalContent });
                     const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('Send Media Timeout (60s)')), 60000));
@@ -1328,23 +1262,21 @@ async function startBroadcastProcessor() {
                 });
 
                 messageStatusUpdated = true;
-                dailySentCount++;
-                console.log(`✅ Sent. [Batch: ${batchMessageCount + 1}/15 | Daily: ${dailySentCount}/${dailyLimit || '∞'}]`);
+                currentEntry.dailySentCount++;
+                console.log(`✅ [${instanceId.slice(0, 8)}] Sent. [Batch: ${currentEntry.batchMessageCount + 1}/15 | Daily: ${currentEntry.dailySentCount}/${dailyLimit || '∞'}]`);
             } catch (err: any) {
-                console.error(`❌ Failed to send to ${jid}:`, err?.message || err);
+                console.error(`❌ [${instanceId.slice(0, 8)}] Failed to send to ${jid}:`, err?.message || err);
 
                 if (isRateLimitError(err)) {
-                    if (entry) {
-                        entry.isPaused = true;
-                        entry.pauseReason = `Rate-limit on send: ${err?.message || 'Unknown'}`;
-                    }
-                    const reason = entry?.pauseReason || 'Rate-limit on send';
+                    currentEntry.isPaused = true;
+                    currentEntry.pauseReason = `Rate-limit on send: ${err?.message || 'Unknown'}`;
+                    const reason = currentEntry.pauseReason;
                     await logAntiBanAction(broadcast.id, 'RATE_LIMIT_PAUSE', reason);
                     await prisma.broadcast.update({
                         where: { id: broadcast.id },
                         data: { status: 'PAUSED_RATE_LIMIT' },
                     });
-                    console.error(`[CRITICAL] 🛑 ${reason}`);
+                    console.error(`[CRITICAL][${instanceId}] 🛑 ${reason}`);
                     messageStatusUpdated = true;
                     continue;
                 }
@@ -1365,7 +1297,7 @@ async function startBroadcastProcessor() {
             } finally {
                 if (!messageStatusUpdated) {
                     try {
-                        console.warn(`[FAILSAFE] Message ${messageTask.id} not updated. Forcing FAILED.`);
+                        console.warn(`[FAILSAFE][${instanceId}] Message ${messageTask.id} not updated. Forcing FAILED.`);
                         await prisma.message.update({
                             where: { id: messageTask.id },
                             data: {
@@ -1379,26 +1311,36 @@ async function startBroadcastProcessor() {
                             data: { failed: { increment: 1 } },
                         });
                     } catch (fatalErr) {
-                        console.error('[FATAL] Failed to update message status:', fatalErr);
+                        console.error(`[FATAL][${instanceId}] Failed to update message status:`, fatalErr);
                     }
                 }
             }
 
             // ── Batch Cooling ─────────────────────────────────
-            await applyBatchCoolingIfNeeded(broadcast.id, activeSock);
+            await applyBatchCoolingIfNeeded(currentEntry, broadcast.id);
 
             // ── Delay ─────────────────────────────────────────
-            console.log(`⏳ Waiting ${(delay / 1000).toFixed(1)}s...`);
+            console.log(`⏳ [${instanceId.slice(0, 8)}] Waiting ${(delay / 1000).toFixed(1)}s...`);
             await wait(delay);
 
         } catch (e: any) {
-            console.error('Error in broadcast loop:', e);
-            if (isRateLimitError(e)) {
-                console.error(`[CRITICAL] 🛑 Fatal rate-limit: ${e?.message}`);
-            }
+            console.error(`[PROCESSOR][${instanceId}] Error in loop:`, e);
             await wait(5000);
         }
     }
+}
+
+async function startBroadcastProcessor() {
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    console.log('🚀 Anti-Ban Broadcast Processor v4.2 (Parallel Multi-Tenant)');
+    console.log('   ├─ Parallel Instance Loops: Active ✓');
+    console.log('   ├─ Localized Counters & Cache ✓');
+    console.log('   ├─ Per-Instance Batch Cooling ✓');
+    console.log('   ├─ Multi-Tenant Isolation: Guaranteed ✓');
+    console.log('   └─ Non-Blocking Processor Architecture ✓');
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+
+    // This function now just logs start. The loops are triggered per connection.
 }
 
 // ============================================================================
