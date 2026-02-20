@@ -26,12 +26,52 @@ export async function GET() {
             return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
         }
 
-        const instance = await prisma.instance.findFirst({
+        // ─── Find or Auto-Provision Instance for this User ────────────
+        let instance = await prisma.instance.findFirst({
             where: { users: { some: { id: userId } } }
         });
 
-        // If generic worker context, assume we just want system status
-        // But for dashboard, we want USER-specific status
+        // If no instance exists for this user, create one automatically.
+        // This ensures every user gets their own isolated WhatsApp session.
+        if (!instance) {
+            const user = await prisma.user.findUnique({
+                where: { id: userId },
+                select: { id: true, phone: true, name: true, username: true }
+            });
+
+            if (user) {
+                try {
+                    // Try to create a new instance with the user's phone number
+                    instance = await prisma.instance.create({
+                        data: {
+                            phoneNumber: user.phone,
+                            name: `WA ${user.name || user.username}`,
+                            status: 'DISCONNECTED',
+                            users: { connect: { id: user.id } }
+                        }
+                    });
+                    console.log(`[STATUS API] Auto-provisioned Instance ${instance.id} for User ${user.username} (${user.phone})`);
+                } catch (createError: any) {
+                    // If phone number already exists (unique constraint), link user to existing instance
+                    if (createError.code === 'P2002') {
+                        const existingInstance = await prisma.instance.findUnique({
+                            where: { phoneNumber: user.phone }
+                        });
+                        if (existingInstance) {
+                            instance = await prisma.instance.update({
+                                where: { id: existingInstance.id },
+                                data: { users: { connect: { id: user.id } } }
+                            });
+                            console.log(`[STATUS API] Linked User ${user.username} to existing Instance ${instance.id}`);
+                        }
+                    } else {
+                        console.error('[STATUS API] Failed to auto-provision instance:', createError);
+                    }
+                }
+            }
+        }
+
+        // ─── Fetch User Details ──────────────────────────────────────
         let user = null;
         if (userId) {
             user = await prisma.user.findUnique({
@@ -56,9 +96,10 @@ export async function GET() {
             instance,
             activeBroadcast,
             recent: recentBroadcasts,
-            user // Return the full user object (or selected fields)
+            user
         });
     } catch (error) {
+        console.error('[STATUS API] Error:', error);
         return NextResponse.json({ error: 'Failed to fetch status' }, { status: 500 });
     }
 }
