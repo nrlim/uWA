@@ -359,15 +359,13 @@ async function cleanupSocketForInstance(instanceId: string, reason: string): Pro
 
     stopPresenceHeartbeat(instanceId);
 
-    try {
-        entry.sock.ev.removeAllListeners('creds.update');
-        entry.sock.ev.removeAllListeners('connection.update');
-        entry.sock.end(undefined);
-        if (entry.sock.ws) {
-            entry.sock.ws.close();
-        }
-    } catch (err) {
-        console.error(`[CLEANUP] Error during teardown for ${instanceId}:`, err);
+    if (entry.sock) {
+        try {
+            entry.sock?.ev?.removeAllListeners('creds.update');
+            entry.sock?.ev?.removeAllListeners('connection.update');
+            entry.sock?.ws?.close();
+            entry.sock?.end?.(undefined);
+        } catch (err) { /* ignore cleanup errors */ }
     }
 
     socketPool.delete(instanceId);
@@ -458,11 +456,14 @@ async function connectInstance(instanceId: string): Promise<void> {
         version,
         auth: state,
         logger: pino({ level: 'silent' }) as any, // Prevent verbose disk I/O and memory explosion
-        browser: Browsers.macOS('Chrome'),
+        browser: ['Mac OS', 'Chrome', '121.0.0.0'],
         mobile: false,
-        options: { headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36' } },
+        options: { headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36' } },
         syncFullHistory: false,
         shouldSyncHistoryMessage: () => false,
+        // @ts-ignore - Bypassing type checking for deprecated/custom fork property
+        getNextSyncHistoryMessage: () => undefined,
+        patchMessageBeforeSending: (message: any) => message,
         linkPreviewImageThumbnailWidth: 192,
         generateHighQualityLinkPreview: true,
         waWebSocketUrl: 'wss://web.whatsapp.com/ws/chat',
@@ -514,8 +515,8 @@ async function connectInstance(instanceId: string): Promise<void> {
                     return; // Stop further processing
                 }
 
-                // Clear previous QR timeout
-                if (entry.qrTimeout) {
+                // Clear previous QR timeout properly on attempt #1 to avoid race conditions
+                if (entry.qrAttempts === 1 && entry.qrTimeout) {
                     clearTimeout(entry.qrTimeout);
                     entry.qrTimeout = null;
                 }
@@ -531,30 +532,32 @@ async function connectInstance(instanceId: string): Promise<void> {
                     console.error(`[Connection] ❌ Failed to save QR for ${instanceId}:`, error);
                 }
 
-                // QR Timeout: if not scanned within 60s, allow regeneration
-                entry.qrTimeout = setTimeout(async () => {
-                    const currentEntry = socketPool.get(instanceId);
-                    if (!currentEntry) return;
+                // QR Timeout: start guard only on first attempt
+                if (entry.qrAttempts === 1) {
+                    entry.qrTimeout = setTimeout(async () => {
+                        const currentEntry = socketPool.get(instanceId);
+                        if (!currentEntry) return;
 
-                    console.log(`[Connection] ⏰ QR timeout (${QR_TIMEOUT_MS / 1000}s) for ${instanceId}. Attempt #${currentEntry.qrAttempts}`);
+                        console.log(`[Connection] ⏰ QR timeout (${QR_TIMEOUT_MS / 1000}s) for ${instanceId}. Attempt #${currentEntry.qrAttempts}`);
 
-                    // After 6 failed attempts (6 QR cycles), close and retry cleanly
-                    if (currentEntry.qrAttempts >= 6) {
-                        console.log(`[Connection] ⚠️ QR not scanned after ${currentEntry.qrAttempts} attempts for ${instanceId}. Closing for retry.`);
+                        // After 6 failed attempts (6 QR cycles), close and retry cleanly
+                        if (currentEntry.qrAttempts >= 6) {
+                            console.log(`[Connection] ⚠️ QR not scanned after ${currentEntry.qrAttempts} attempts for ${instanceId}. Closing for retry.`);
 
-                        await cleanupSocketForInstance(instanceId, 'qr_timeout_max_attempts');
+                            await cleanupSocketForInstance(instanceId, 'qr_timeout_max_attempts');
 
-                        try {
-                            await prisma.instance.update({
-                                where: { id: instanceId },
-                                data: { status: 'DISCONNECTED', qrCode: '' },
-                            });
-                        } catch { /* ignore */ }
+                            try {
+                                await prisma.instance.update({
+                                    where: { id: instanceId },
+                                    data: { status: 'DISCONNECTED', qrCode: '' },
+                                });
+                            } catch { /* ignore */ }
 
-                        // The connection manager will pick this up and retry automatically
-                    }
-                    // < 6 attempts: Baileys will auto-generate new QR
-                }, QR_TIMEOUT_MS);
+                            // The connection manager will pick this up and retry automatically
+                        }
+                        // < 6 attempts: Baileys will auto-generate new QR
+                    }, QR_TIMEOUT_MS);
+                }
             }
         }
 
@@ -780,7 +783,11 @@ async function startConnectionManager(): Promise<void> {
             if (allInstances.length > 0) {
                 for (const inst of allInstances) {
                     const inPool = socketPool.has(inst.id) ? '✅ in pool' : '❌ not in pool';
-                    console.log(`[CONNECTION MANAGER]   │ ${inst.id} | status=${inst.status} | phone=${inst.phoneNumber} | ${inPool}`);
+                    let displayStatus = inst.status;
+                    if (socketPool.has(inst.id) && inst.status === 'DISCONNECTED') {
+                        displayStatus = 'CONNECTING...';
+                    }
+                    console.log(`[CONNECTION MANAGER]   │ ${inst.id} | status=${displayStatus} | phone=${inst.phoneNumber} | ${inPool}`);
                 }
             } else {
                 console.log('[CONNECTION MANAGER]   ⚠️ No instances found in database! User must visit dashboard to auto-create one.');
