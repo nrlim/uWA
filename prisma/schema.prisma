@@ -106,6 +106,7 @@ model User {
   templates     Template[]
   settings      Settings?
   contacts      Contact[]
+  transactions  Transaction[]
 }
 
 model Settings {
@@ -131,4 +132,18 @@ model Contact {
   updatedAt DateTime @updatedAt
 
   @@unique([userId, phone])
+}
+
+model Transaction {
+  id              String   @id @default(cuid())
+  userId          String
+  user            User     @relation(fields: [userId], references: [id])
+  orderId         String   @unique
+  grossAmount     Int
+  status          String   @default("pending")
+  plan            Plan
+  paymentType     String?
+  transactionId   String?  @unique
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
 }

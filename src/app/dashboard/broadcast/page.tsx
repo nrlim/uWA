@@ -512,37 +512,80 @@ export default function BroadcastPage() {
                     </Card>
 
                     {/* STEP 2: AUDIENCE SELECTION */}
-                    <Card className="border border-slate-200 shadow-sm">
-                        <CardHeader className="bg-slate-50/50 pb-4 border-b border-slate-100">
+                    <Card className="border border-slate-200 shadow-sm overflow-hidden">
+                        <CardHeader className="bg-slate-50/50 pb-4 border-b border-slate-100 flex flex-row items-center justify-between">
                             <CardTitle className="text-base font-semibold text-slate-900 flex items-center gap-2">
                                 <div className="h-6 w-6 rounded-full bg-slate-900 text-white flex items-center justify-center text-xs font-bold">2</div>
                                 Target Audiens
                             </CardTitle>
-                        </CardHeader>
-                        <CardContent className="p-6">
-                            <div className="border border-slate-200 rounded-xl p-6 text-center bg-slate-50 flex flex-col items-center justify-center space-y-3">
-                                <div className="h-12 w-12 bg-blue-100 rounded-full flex items-center justify-center text-blue-600">
-                                    <Users className="h-6 w-6" />
-                                </div>
-                                <div>
-                                    <h3 className="font-semibold text-slate-900">Pilih dari Database Kontak</h3>
-                                    <p className="text-xs text-slate-500 mt-1">Gunakan nomor yang telah diverifikasi untuk menjamin keamanan broadcast.</p>
-                                </div>
-                                <Button onClick={() => setIsContactModalOpen(true)} className="bg-blue-600 hover:bg-blue-700 mt-2" disabled={isLocked}>
-                                    Cari & Pilih Kontak
-                                </Button>
-                            </div>
-
-                            {/* Audience Summary */}
                             {contacts.length > 0 && (
-                                <div className="mt-4 flex items-center justify-between p-3 bg-emerald-50 border border-emerald-100 rounded-lg">
-                                    <div className="flex items-center gap-2">
-                                        <CheckCircle2 className="h-4 w-4 text-emerald-600" />
-                                        <span className="text-sm font-semibold text-emerald-900">{contacts.length} Penerima Valid</span>
+                                <Badge variant="outline" className="bg-emerald-50 text-emerald-600 border-emerald-200 text-[10px] font-bold px-2 py-0.5">
+                                    {contacts.length} KONTAK
+                                </Badge>
+                            )}
+                        </CardHeader>
+                        <CardContent className="p-0">
+                            {contacts.length === 0 ? (
+                                <div className="p-8 text-center bg-slate-50/50 flex flex-col items-center justify-center space-y-3">
+                                    <div className="h-12 w-12 bg-blue-100 rounded-full flex items-center justify-center text-blue-600 mb-2">
+                                        <Users className="h-6 w-6" />
                                     </div>
-                                    <button onClick={() => { setContacts([]); setFile(null) }} className="text-xs text-emerald-700 hover:text-emerald-900 font-medium underline">
-                                        Reset
-                                    </button>
+                                    <div>
+                                        <h3 className="font-semibold text-slate-900">Pilih dari Database Kontak</h3>
+                                        <p className="text-xs text-slate-500 mt-1 max-w-[280px] mx-auto leading-relaxed">Gunakan nomor yang telah Anda verifikasi sebelumnya untuk menjamin pengiriman aman.</p>
+                                    </div>
+                                    <Button onClick={() => { setSelectedContactIds(new Set(contacts)); setIsContactModalOpen(true); }} className="bg-blue-600 hover:bg-blue-700 mt-4 shadow-sm" disabled={isLocked}>
+                                        <Search className="h-4 w-4 mr-2" /> Cari & Pilih Kontak
+                                    </Button>
+                                </div>
+                            ) : (
+                                <div className="flex flex-col relative">
+                                    <div className="flex items-center justify-between p-4 bg-white border-b border-slate-100 sticky top-0 z-10">
+                                        <div className="flex items-center gap-3">
+                                            <div className="h-10 w-10 bg-emerald-100/50 rounded-full flex items-center justify-center border border-emerald-200/50">
+                                                <CheckCircle2 className="h-5 w-5 text-emerald-600" />
+                                            </div>
+                                            <div>
+                                                <div className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                                                    {contacts.length} Penerima
+                                                    <Badge className="bg-emerald-500/10 text-emerald-600 hover:bg-emerald-500/20 text-[9px] h-4 px-1.5 border-none">Valid</Badge>
+                                                </div>
+                                                <div className="text-[10px] text-slate-500 mt-0.5">Siap untuk diproses oleh sistem</div>
+                                            </div>
+                                        </div>
+                                        <div className="flex items-center gap-2">
+                                            <Button
+                                                variant="outline"
+                                                size="sm"
+                                                onClick={() => { setSelectedContactIds(new Set(contacts)); setIsContactModalOpen(true); }}
+                                                className="h-8 text-xs bg-white border-slate-200 text-slate-700 hover:bg-slate-50 hover:text-blue-600"
+                                                disabled={isLocked}
+                                            >
+                                                Pilih Ulang
+                                            </Button>
+                                            <Button
+                                                variant="ghost"
+                                                size="sm"
+                                                onClick={() => { setContacts([]); setFile(null); setSelectedContactIds(new Set()); }}
+                                                className="h-8 w-8 p-0 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-md"
+                                                disabled={isLocked}
+                                            >
+                                                <Trash2 className="h-4 w-4" />
+                                            </Button>
+                                        </div>
+                                    </div>
+
+                                    {/* Number List Scrollable Container */}
+                                    <div className="p-4 bg-slate-50 max-h-[260px] overflow-y-auto">
+                                        <div className="flex flex-wrap gap-2">
+                                            {contacts.map((phone, idx) => (
+                                                <div key={idx} className="flex items-center gap-1.5 pl-2 pr-2.5 py-1 bg-white border border-slate-200 rounded-md shadow-sm hover:border-blue-300 hover:shadow transition-all group">
+                                                    <div className="h-1.5 w-1.5 rounded-full bg-emerald-500"></div>
+                                                    <span className="font-mono text-xs text-slate-700 font-medium tracking-tight group-hover:text-blue-700">{phone}</span>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </div>
                                 </div>
                             )}
                         </CardContent>

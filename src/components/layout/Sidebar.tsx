@@ -12,7 +12,8 @@ import {
     LogOut,
     MessageCircle,
     FileText,
-    Users
+    Users,
+    CreditCard
 } from "lucide-react"
 
 const menuItems = [
@@ -22,6 +23,7 @@ const menuItems = [
     { name: "Broadcast", icon: Radio, href: "/dashboard/broadcast" },
     { name: "Templates", icon: FileText, href: "/dashboard/templates" },
     { name: "History", icon: History, href: "/dashboard/history" },
+    { name: "Subscription", icon: CreditCard, href: "/dashboard/subscription" },
     { name: "Settings", icon: Settings, href: "/dashboard/settings" },
 ]
 

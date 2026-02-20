@@ -80,6 +80,54 @@ function deleteSessionFolder(instanceId: string): void {
 }
 
 /**
+ * Validate creds.json for a given instanceId.
+ * If the file exists but is corrupted (empty, truncated, or invalid JSON),
+ * it is deleted so that Baileys generates fresh credentials on the next connect.
+ * Returns true if creds are valid or absent (fresh start), false if they were corrupted and removed.
+ */
+function validateCredsFile(instanceId: string): boolean {
+    const sessionPath = getSessionPath(instanceId);
+    const credsPath = path.join(sessionPath, 'creds.json');
+
+    if (!fs.existsSync(credsPath)) {
+        console.log(`[SESSION] creds.json absent for ${instanceId} — fresh session will be created.`);
+        return true; // No creds file = fresh start, which is fine
+    }
+
+    try {
+        const raw = fs.readFileSync(credsPath, 'utf-8').trim();
+
+        // Empty file check
+        if (raw.length === 0) {
+            throw new Error('creds.json is empty');
+        }
+
+        const parsed = JSON.parse(raw);
+
+        // Basic structure validation - creds must have essential fields
+        if (!parsed || typeof parsed !== 'object') {
+            throw new Error('creds.json parsed to non-object');
+        }
+
+        console.log(`[SESSION] ✅ creds.json valid for ${instanceId}`);
+        return true;
+    } catch (err: any) {
+        console.warn(`[SESSION] ⚠️ Corrupted creds.json for ${instanceId}: ${err.message}`);
+        console.log(`[SESSION] 🗑️ Removing corrupted creds.json for ${instanceId}`);
+
+        try {
+            fs.unlinkSync(credsPath);
+        } catch (unlinkErr: any) {
+            // If we can't delete just the file, nuke the whole session folder
+            console.warn(`[SESSION] Failed to delete creds.json, removing entire session folder: ${unlinkErr.message}`);
+            deleteSessionFolder(instanceId);
+        }
+
+        return false;
+    }
+}
+
+/**
  * Get the active socket for a given instanceId from the pool.
  */
 function getSocket(instanceId: string): any | null {
@@ -381,13 +429,22 @@ async function connectInstance(instanceId: string): Promise<void> {
     const sessionPath = getSessionPath(instanceId);
     console.log(`[Connection] Session path: ${sessionPath}`);
 
+    // ── Task 4: Validate creds.json before loading auth state ──
+    const credsValid = validateCredsFile(instanceId);
+    if (!credsValid) {
+        console.log(`[Connection] Corrupted creds removed for ${instanceId}. Proceeding with fresh session.`);
+    }
+
     const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
 
+    // ── Task 1 & 3: Modern browser identity + socket options tuning ──
     const sock = makeWASocket({
         auth: state,
         logger: pino({ level: 'silent' }) as any,
-        browser: Browsers.macOS('Desktop'),
+        browser: ["uWA Desktop", "Chrome", "1.0.0"] as any,
         syncFullHistory: false,
+        connectTimeoutMs: 60_000,
+        printQRInTerminal: false,
     });
 
     // Register in socket pool
@@ -463,13 +520,33 @@ async function connectInstance(instanceId: string): Promise<void> {
         // ── Connection Closed ─────────────────────────────────
         if (connection === 'close') {
             const statusCode = (lastDisconnect?.error as Boom)?.output?.statusCode;
+            const errorMessage = ((lastDisconnect?.error as Boom)?.message || '').toLowerCase();
             let shouldReconnect = statusCode !== DisconnectReason.loggedOut;
 
-            console.log(`[Connection] ❌ Connection closed for ${instanceId} (code: ${statusCode})`);
+            console.log(`[Connection] ❌ Connection closed for ${instanceId} (code: ${statusCode}, msg: ${errorMessage})`);
+
+            // ── Task 2: Bad session detection ──
+            // These status codes indicate the session state is corrupted or rejected by WhatsApp.
+            // 401 = Unauthorized (bad creds), 408 = Request Timeout (stale session),
+            // 440 = Session replaced on another device, 500+ = server-side rejection.
+            const BAD_SESSION_CODES = [401, 408, 440];
+            const isBadSession =
+                BAD_SESSION_CODES.includes(statusCode) ||
+                statusCode >= 500 ||
+                errorMessage.includes('bad session') ||
+                errorMessage.includes('connection failure') ||
+                errorMessage.includes('stream errored') ||
+                errorMessage.includes('qr refs over limit');
 
             // Logged out → delete session for fresh QR
             if (statusCode === DisconnectReason.loggedOut) {
                 console.log(`[Connection] 🔐 Logged out for ${instanceId}. Clearing session...`);
+                deleteSessionFolder(instanceId);
+                shouldReconnect = true;
+            }
+            // Bad session (not logged out) → delete session for clean re-pair
+            else if (isBadSession) {
+                console.log(`[Connection] ⚠️ Bad session detected for ${instanceId} (code: ${statusCode}). Purging session folder for clean re-pair...`);
                 deleteSessionFolder(instanceId);
                 shouldReconnect = true;
             }
@@ -682,7 +759,11 @@ async function applyBatchCoolingIfNeeded(broadcastId: string, sock: any): Promis
 
 async function startBroadcastProcessor() {
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    console.log('🚀 Anti-Ban Broadcast Processor v4.0 (Multi-Tenant)');
+    console.log('🚀 Anti-Ban Broadcast Processor v4.1 (Multi-Tenant)');
+    console.log('   ├─ Browser Identity: uWA Desktop/Chrome/1.0.0 ✓');
+    console.log('   ├─ creds.json Pre-Validation ✓');
+    console.log('   ├─ Bad Session Auto-Cleanup (401/408/440/5xx) ✓');
+    console.log('   ├─ Connect Timeout: 60s ✓');
     console.log('   ├─ Dynamic Session Paths (auth-${instanceId}) ✓');
     console.log('   ├─ Socket Pool / Connection Manager ✓');
     console.log('   ├─ QR Timeout (60s auto-regenerate) ✓');

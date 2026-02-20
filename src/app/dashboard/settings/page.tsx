@@ -8,6 +8,7 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Badge } from "@/components/ui/badge"
 import { User, Shield, Key, Bell, Save, CreditCard, CheckCircle2, Zap, AlertCircle, Loader2 } from "lucide-react"
+import Link from "next/link"
 
 export default function SettingsPage() {
     const { user, isLoading } = useStatus()
@@ -99,7 +100,9 @@ export default function SettingsPage() {
                                         </p>
                                     </div>
                                 </div>
-                                <Button variant="outline" size="sm" className="mt-2 text-xs h-8">Upgrade Plan</Button>
+                                <Link href="/dashboard/subscription" className="inline-block mt-2">
+                                    <Button variant="outline" size="sm" className="text-xs h-8">Upgrade Plan</Button>
+                                </Link>
                             </div>
 
                             {/* Credit Stats */}
