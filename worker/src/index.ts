@@ -426,7 +426,9 @@ async function connectInstance(instanceId: string): Promise<void> {
     console.log(`[Connection] ═══════════════════════════════════════════`);
 
     // Check if already in pool
+    let previousFailures = 0;
     if (socketPool.has(instanceId)) {
+        previousFailures = socketPool.get(instanceId)?.connectionFailures || 0;
         console.log(`[Connection] Socket already in pool for ${instanceId}. Cleaning up first...`);
         await cleanupSocketForInstance(instanceId, 'reconnection');
     }
@@ -442,7 +444,7 @@ async function connectInstance(instanceId: string): Promise<void> {
     }
 
     const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
-    const version: [number, number, number] = [2, 3000, 1015901307];
+    const { version } = await fetchLatestBaileysVersion();
     console.log(`[Connection] Using WA v${version.join('.')} for ${instanceId}`);
 
     // Add random delay to prevent burst connection attempts that trigger 405
@@ -459,7 +461,7 @@ async function connectInstance(instanceId: string): Promise<void> {
         browser: Browsers.macOS('Chrome'),
         mobile: false,
         options: { headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36' } },
-        syncFullHistory: true,
+        syncFullHistory: false,
         shouldSyncHistoryMessage: () => false,
         linkPreviewImageThumbnailWidth: 192,
         generateHighQualityLinkPreview: true,
@@ -478,7 +480,7 @@ async function connectInstance(instanceId: string): Promise<void> {
         qrTimeout: null,
         qrAttempts: 0,
         presenceInterval: null,
-        connectionFailures: 0,
+        connectionFailures: previousFailures,
         lastBroadcastActivity: Date.now(),
     };
     socketPool.set(instanceId, poolEntry);
@@ -619,6 +621,12 @@ async function connectInstance(instanceId: string): Promise<void> {
                 }
             }
 
+            const trackEntry = socketPool.get(instanceId);
+            let failures = trackEntry ? trackEntry.connectionFailures : 0;
+            if (statusCode === 405) {
+                failures++;
+            }
+
             await cleanupSocketForInstance(instanceId, `connection_close_${statusCode}`);
 
             try {
@@ -645,9 +653,23 @@ async function connectInstance(instanceId: string): Promise<void> {
             if (shouldReconnect) {
                 let reconnectDelay = randomInt(3000, 10000);
                 if (statusCode === 405) {
-                    reconnectDelay = randomInt(30000, 60000);
+                    reconnectDelay = Math.min(60000 * Math.pow(2, failures), 600000);
                     console.log(`[Connection] ⚠️ 405 Connection Failure detected. Imposing longer backoff of ${reconnectDelay / 1000}s to cool down IP.`);
+
+                    if (!broadcastHalted) {
+                        broadcastHalted = true;
+                        setTimeout(() => {
+                            if (broadcastHalted) {
+                                broadcastHalted = false;
+                                console.log('[SYSTEM] ♻️ 10 minutes global halt lifted.');
+                            }
+                        }, 600000);
+                    }
                 }
+
+                // Prevent connection manager interference and persist failures
+                socketPool.set(instanceId, { connectionFailures: failures } as any);
+
                 console.log(`[Connection] 🔄 Reconnecting ${instanceId} in ${reconnectDelay / 1000}s...`);
                 await wait(reconnectDelay);
                 await connectInstance(instanceId);
