@@ -363,6 +363,9 @@ async function cleanupSocketForInstance(instanceId: string, reason: string): Pro
         entry.sock.ev.removeAllListeners('creds.update');
         entry.sock.ev.removeAllListeners('connection.update');
         entry.sock.end(undefined);
+        if (entry.sock.ws) {
+            entry.sock.ws.close();
+        }
     } catch (err) {
         console.error(`[CLEANUP] Error during teardown for ${instanceId}:`, err);
     }
@@ -442,13 +445,20 @@ async function connectInstance(instanceId: string): Promise<void> {
     const version: [number, number, number] = [2, 3000, 1015901307];
     console.log(`[Connection] Using WA v${version.join('.')} for ${instanceId}`);
 
+    // Add random delay to prevent burst connection attempts that trigger 405
+    const handshakeDelay = randomInt(2000, 5000);
+    console.log(`[Connection] Delaying handshake by ${handshakeDelay}ms for ${instanceId}`);
+    await wait(handshakeDelay);
+
     // ── Browser identity + socket options ──
     // Use Web protocol to avoid heavy mobile history sync chunk timeouts
     const sock = makeWASocket({
         version,
         auth: state,
         logger: pino({ level: 'silent' }) as any, // Prevent verbose disk I/O and memory explosion
-        browser: Browsers.macOS('Desktop'),
+        browser: Browsers.macOS('Chrome'),
+        mobile: false,
+        options: { headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36' } },
         syncFullHistory: true,
         shouldSyncHistoryMessage: () => false,
         linkPreviewImageThumbnailWidth: 192,
@@ -633,7 +643,11 @@ async function connectInstance(instanceId: string): Promise<void> {
             }
 
             if (shouldReconnect) {
-                const reconnectDelay = randomInt(3000, 10000);
+                let reconnectDelay = randomInt(3000, 10000);
+                if (statusCode === 405) {
+                    reconnectDelay = randomInt(30000, 60000);
+                    console.log(`[Connection] ⚠️ 405 Connection Failure detected. Imposing longer backoff of ${reconnectDelay / 1000}s to cool down IP.`);
+                }
                 console.log(`[Connection] 🔄 Reconnecting ${instanceId} in ${reconnectDelay / 1000}s...`);
                 await wait(reconnectDelay);
                 await connectInstance(instanceId);
