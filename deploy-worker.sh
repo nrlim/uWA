@@ -5,7 +5,7 @@ set -e  # Exit immediately on any error
 PROJECT_NAME="uwa-worker"
 WORKER_DIR="./worker"
 SCHEMA_PATH="../prisma/schema.prisma"
-MEMORY_LIMIT=1024  # Limit 1GB (1024MB) untuk stabilitas engine Baileys
+MEMORY_LIMIT=2048  # Limit 2GB (2048MB) untuk stabilitas engine Baileys
 
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "🚀 Memulai Deployment uWA Worker (Senior Mode)"
@@ -49,7 +49,18 @@ if [ ! -f "dist/index.js" ]; then
 fi
 echo "   ✅ Build berhasil"
 
-# 6. Restart PM2 dengan Explicit Node Args (1GB Limit)
+# 5.5 Optional Session Cleanup (Prevent 405/503)
+echo ""
+echo "🧹 [Optional] Bersihkan folder \`sessions\` untuk mencegah error handshake lama? (y/n)"
+read -t 10 -p "> " CLEAN_SESSIONS || true
+if [[ "$CLEAN_SESSIONS" =~ ^[Yy]$ ]]; then
+  echo "Menghapus folder sessions/ untuk Clean Deploy..."
+  rm -rf sessions/
+else
+  echo "Melewati pembersihan sesi."
+fi
+
+# 6. Restart PM2 dengan Explicit Node Args (2GB Limit)
 echo ""
 echo "♻️  [6/7] Me-restart service dengan limit heap ${MEMORY_LIMIT}MB..."
 
@@ -73,5 +84,5 @@ echo "✅ Deployment uWA Worker Selesai!"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 pm2 list
 echo ""
-echo "Engine uWA berjalan dengan limit heap $MEMORY_LIMIT MB (1GB)."
+echo "Engine uWA berjalan dengan limit heap $MEMORY_LIMIT MB (2GB)."
 echo "Gunakan 'pm2 logs $PROJECT_NAME' untuk melihat log."

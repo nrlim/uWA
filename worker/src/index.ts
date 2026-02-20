@@ -9,10 +9,11 @@ import * as path from 'path';
 
 // ============================================================================
 // INITIALIZATION
+// WARNING: Start the process with --max-old-space-size=2048
 // ============================================================================
 
 const prisma = new PrismaClient();
-const MEMORY_LIMIT_MB = 1024;
+const MEMORY_LIMIT_MB = 2048;
 const QR_TIMEOUT_MS = 60_000; // 60 seconds before QR timeout
 const SESSIONS_DIR = path.join(process.cwd(), 'sessions');
 const CONNECTION_SCAN_INTERVAL_MS = 10_000; // Check for new instances every 10s
@@ -243,8 +244,8 @@ function checkMemoryUsage(): { usedMB: number; ok: boolean } {
     const usedMB = Math.round(usage.heapUsed / 1024 / 1024);
     const ok = usedMB < MEMORY_LIMIT_MB * 0.85;
 
-    if (usedMB > 920) {
-        console.error(`[MEMORY GUARD] 🚨 RAM limit exceeded (${usedMB}MB). Triggering graceful shutdown.`);
+    if (usedMB > 1800) {
+        console.error(`[MEMORY] 🚨 Critical RAM usage (${usedMB}MB / 2048MB). Initiating graceful restart.`);
         gracefulShutdown('MEM_EXCEEDED');
     }
 
@@ -374,15 +375,13 @@ async function cleanupSocketForInstance(instanceId: string, reason: string): Pro
     if (entry.sock) {
         try {
             // Priority 1: Extensive null-checks with optional chaining
-            entry.sock?.ev?.removeAllListeners('creds.update');
-            entry.sock?.ev?.removeAllListeners('connection.update');
+            entry.sock?.ev?.removeAllListeners?.('creds.update');
+            entry.sock?.ev?.removeAllListeners?.('connection.update');
 
-            if (entry.sock?.ws) {
-                entry.sock.ws.close();
-            }
+            entry.sock?.ws?.close?.();
 
             if (typeof entry.sock?.end === 'function') {
-                entry.sock.end(undefined);
+                entry.sock?.end?.(undefined);
             }
         } catch (err) { /* ignore cleanup errors */ }
     }
@@ -523,7 +522,7 @@ async function connectInstance(instanceId: string): Promise<void> {
                 entry.connectingTimeout = setTimeout(async () => {
                     const currentEntry = socketPool.get(instanceId);
                     if (currentEntry) {
-                        console.log(`[Connection] ⚠️ Stuck in connecting for > 45s. Forcing restart for ${instanceId}.`);
+                        console.log(`[Connection] ⚠️ Stuck in connecting for > 90s. Forcing restart for ${instanceId}.`);
                         await cleanupSocketForInstance(instanceId, 'connecting_timeout');
                         try {
                             await prisma.instance.update({
@@ -532,7 +531,7 @@ async function connectInstance(instanceId: string): Promise<void> {
                             });
                         } catch { }
                     }
-                }, 45000);
+                }, 90000);
             }
         }
 
@@ -540,6 +539,12 @@ async function connectInstance(instanceId: string): Promise<void> {
         if (qr) {
             const entry = socketPool.get(instanceId);
             if (entry) {
+                // Technically, receiving a QR means the connection succeeded in linking state.
+                if (entry.connectingTimeout) {
+                    clearTimeout(entry.connectingTimeout);
+                    entry.connectingTimeout = null;
+                }
+
                 entry.qrAttempts++;
                 console.log(`[Connection] QR Received for Instance: ${instanceId} (attempt #${entry.qrAttempts})`);
 
