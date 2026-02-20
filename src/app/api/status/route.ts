@@ -22,8 +22,12 @@ export async function GET() {
             }
         }
 
+        if (!userId) {
+            return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+        }
+
         const instance = await prisma.instance.findFirst({
-            where: { name: 'default-worker' }
+            where: { userId }
         });
 
         // If generic worker context, assume we just want system status
@@ -37,13 +41,14 @@ export async function GET() {
         }
 
         const activeBroadcast = await prisma.broadcast.findFirst({
-            where: { status: { in: ['PENDING', 'RUNNING'] } },
+            where: { status: { in: ['PENDING', 'RUNNING'] }, userId },
             orderBy: { createdAt: 'desc' }
         });
 
         // Also get recent completed
         const recentBroadcasts = await prisma.broadcast.findMany({
-            take: 5,
+            where: { userId },
+            take: 20,
             orderBy: { createdAt: 'desc' }
         });
 
