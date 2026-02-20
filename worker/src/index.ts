@@ -29,6 +29,8 @@ interface SocketEntry {
     instanceId: string;
     qrTimeout: ReturnType<typeof setTimeout> | null;
     connectingTimeout?: ReturnType<typeof setTimeout> | null;
+    isPaused: boolean;
+    pauseReason: string;
     qrAttempts: number;
     presenceInterval: ReturnType<typeof setTimeout> | null;
     connectionFailures: number;
@@ -45,9 +47,8 @@ let batchMessageCount = 0;
 let dailySentCount = 0;
 let lastDailyResetDate = new Date().toDateString();
 
-// Rate-limit / fatal error flag
-let broadcastHalted = false;
-let haltReason = '';
+// Handshake Priority Guard (Pauses broadcasts momentarily for pairing)
+let globalHandshakePauseUntil = 0;
 
 // Media Cache (Download once per campaign)
 let cachedBroadcastId: string | null = null;
@@ -244,7 +245,7 @@ function checkMemoryUsage(): { usedMB: number; ok: boolean } {
     const usedMB = Math.round(usage.heapUsed / 1024 / 1024);
     const ok = usedMB < MEMORY_LIMIT_MB * 0.85;
 
-    if (usedMB > 1800) {
+    if (usedMB > 1850) {
         console.error(`[MEMORY] 🚨 Critical RAM usage (${usedMB}MB / 2048MB). Initiating graceful restart.`);
         gracefulShutdown('MEM_EXCEEDED');
     }
@@ -319,7 +320,7 @@ function startPresenceHeartbeat(instanceId: string): void {
 
     const tick = async () => {
         const currentEntry = socketPool.get(instanceId);
-        if (!currentEntry?.sock || broadcastHalted) return;
+        if (!currentEntry?.sock || currentEntry.isPaused) return;
         if (Math.random() < 0.4) {
             try {
                 await currentEntry.sock.sendPresenceUpdate('available');
@@ -460,7 +461,8 @@ async function connectInstance(instanceId: string): Promise<void> {
     }
 
     const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
-    const { version } = await fetchLatestBaileysVersion();
+    // Hardcode WA version matching stream expectation
+    const version: [number, number, number] = [2, 3000, 1017531287];
     console.log(`[Connection] Using WA v${version.join('.')} for ${instanceId}`);
 
     // Add random delay to prevent burst connection attempts that trigger 405
@@ -485,7 +487,7 @@ async function connectInstance(instanceId: string): Promise<void> {
         linkPreviewImageThumbnailWidth: 192,
         generateHighQualityLinkPreview: true,
         waWebSocketUrl: 'wss://web.whatsapp.com/ws/chat',
-        connectTimeoutMs: 45_000,
+        connectTimeoutMs: 60_000,
         defaultQueryTimeoutMs: 30_000,
         keepAliveIntervalMs: 30_000,
         printQRInTerminal: false,
@@ -498,6 +500,8 @@ async function connectInstance(instanceId: string): Promise<void> {
         instanceId,
         qrTimeout: null,
         qrAttempts: 0,
+        isPaused: false,
+        pauseReason: '',
         presenceInterval: null,
         connectionFailures: previousFailures,
         lastBroadcastActivity: Date.now(),
@@ -636,7 +640,13 @@ async function connectInstance(instanceId: string): Promise<void> {
                 errorMessage.includes('qr refs over limit') ||
                 hasStreamOrHandshakeError;
 
-            if (hasStreamOrHandshakeError) {
+            if (statusCode === 515) {
+                console.log(`[CRITICAL] 🔄 WhatsApp requested restart (515). Resetting stream for ${instanceId}.`);
+                deleteSessionFolder(instanceId);
+                shouldReconnect = true;
+                await wait(5000); // Wait 5 seconds to ensure clean reconnection
+            }
+            else if (hasStreamOrHandshakeError) {
                 console.log(`[CRITICAL] Handshake rejected. Forcing session reset for ${instanceId}`);
                 deleteSessionFolder(instanceId);
                 shouldReconnect = true;
@@ -687,9 +697,13 @@ async function connectInstance(instanceId: string): Promise<void> {
 
             // Detect rate-limit
             if (isRateLimitError(lastDisconnect?.error)) {
-                broadcastHalted = true;
-                haltReason = `Connection closed by WhatsApp (code: ${statusCode}). Possible rate-limit.`;
-                console.error(`[CRITICAL] ${haltReason}`);
+                const currentEntry = socketPool.get(instanceId);
+                if (currentEntry) {
+                    currentEntry.isPaused = true;
+                    currentEntry.pauseReason = `Connection closed by WhatsApp (code: ${statusCode}). Possible rate-limit.`;
+                }
+                const reason = currentEntry?.pauseReason || 'Rate-limit';
+                console.error(`[CRITICAL] ${reason}`);
 
                 await prisma.broadcast.updateMany({
                     where: { status: 'RUNNING', instanceId },
@@ -703,12 +717,15 @@ async function connectInstance(instanceId: string): Promise<void> {
                     reconnectDelay = Math.min(60000 * Math.pow(2, failures), 600000);
                     console.log(`[Connection] ⚠️ 405 Connection Failure detected. Imposing longer backoff of ${reconnectDelay / 1000}s to cool down IP.`);
 
-                    if (!broadcastHalted) {
-                        broadcastHalted = true;
+                    const currentEntry = socketPool.get(instanceId);
+                    if (currentEntry && !currentEntry.isPaused) {
+                        currentEntry.isPaused = true;
+                        currentEntry.pauseReason = '405 Connection Failure cooling down';
                         setTimeout(() => {
-                            if (broadcastHalted) {
-                                broadcastHalted = false;
-                                console.log('[SYSTEM] ♻️ 10 minutes global halt lifted.');
+                            if (currentEntry.isPaused) {
+                                currentEntry.isPaused = false;
+                                currentEntry.pauseReason = '';
+                                console.log(`[SYSTEM] ♻️ 10 minutes halt lifted for ${instanceId}.`);
                             }
                         }, 600000);
                     }
@@ -743,8 +760,10 @@ async function connectInstance(instanceId: string): Promise<void> {
                 entry.connectionFailures = 0; // Reset consecutive connection failures
             }
 
-            broadcastHalted = false;
-            haltReason = '';
+            if (entry) {
+                entry.isPaused = false;
+                entry.pauseReason = '';
+            }
 
             startPresenceHeartbeat(instanceId);
 
@@ -813,10 +832,10 @@ async function startConnectionManager(): Promise<void> {
                 }
             }
 
-            // Find all instances that are DISCONNECTED or QR_READY that need a connection
+            // Find all instances that are INITIALIZING or QR_READY that need a connection
             const candidates = await prisma.instance.findMany({
                 where: {
-                    status: { in: ['DISCONNECTED', 'QR_READY'] },
+                    status: { in: ['INITIALIZING', 'QR_READY'] },
                     users: { some: {} } // Only instances that have at least 1 user linked
                 },
                 select: { id: true, phoneNumber: true, status: true, updatedAt: true },
@@ -832,13 +851,31 @@ async function startConnectionManager(): Promise<void> {
                 for (const inst of allInstances) {
                     const inPool = socketPool.has(inst.id) ? '✅ in pool' : '❌ not in pool';
                     let displayStatus = inst.status;
-                    if (socketPool.has(inst.id) && inst.status === 'DISCONNECTED') {
+                    if (socketPool.has(inst.id) && inst.status === 'INITIALIZING') {
                         displayStatus = 'CONNECTING...';
                     }
                     console.log(`[CONNECTION MANAGER]   │ ${inst.id} | status=${displayStatus} | phone=${inst.phoneNumber} | ${inPool}`);
                 }
             } else {
                 console.log('[CONNECTION MANAGER]   ⚠️ No instances found in database! User must visit dashboard to auto-create one.');
+            }
+
+            for (let i = 0; i < candidates.length; i++) {
+                const instance = candidates[i];
+                if (instance.status === 'INITIALIZING') {
+                    const updatedAtTime = new Date(instance.updatedAt).getTime();
+                    const ageSeconds = (Date.now() - updatedAtTime) / 1000;
+                    if (!socketPool.has(instance.id) && ageSeconds > 120) {
+                        console.log(`[CONNECTION MANAGER] ⏰ Instance ${instance.id} stuck in INITIALIZING for > 2m. Reverting to DISCONNECTED.`);
+                        await prisma.instance.update({
+                            where: { id: instance.id },
+                            data: { status: 'DISCONNECTED' }
+                        });
+                        candidates.splice(i, 1);
+                        i--; // Adjust index after splice
+                        continue;
+                    }
+                }
             }
 
             for (const instance of candidates) {
@@ -856,12 +893,17 @@ async function startConnectionManager(): Promise<void> {
                     console.log(`[CONNECTION MANAGER] ⏰ QR for ${instance.id} timed out (${Math.round(ageSeconds)}s). Allowing refresh.`);
                 }
 
-                // Skip if already in pool and DISCONNECTED (means socket is being set up / reconnecting)
-                if (inPool && instance.status === 'DISCONNECTED') {
+                // Skip if already in pool and INITIALIZING (means socket is being set up / reconnecting)
+                if (inPool && instance.status === 'INITIALIZING') {
                     continue;
                 }
 
                 console.log(`[CONNECTION MANAGER] 🆕 Candidate instance found: ${instance.id} (${instance.phoneNumber}) | status: ${instance.status}`);
+
+                if (instance.status === 'INITIALIZING') {
+                    globalHandshakePauseUntil = Date.now() + 30000;
+                    console.log(`[CONNECTION MANAGER] ⏸️ Pausing all broadcasts for 30s to dedicate CPU/RAM for handshake of ${instance.id}.`);
+                }
 
                 // Memory check before spawning new socket
                 const mem = checkMemoryUsage();
@@ -992,9 +1034,10 @@ async function startBroadcastProcessor() {
             }
 
             // ── Halt Check ────────────────────────────────────
-            if (broadcastHalted) {
-                console.log(`[HALT] Broadcast halted: ${haltReason}. Waiting 30s...`);
-                await wait(30000);
+            if (Date.now() < globalHandshakePauseUntil) {
+                const remaining = Math.round((globalHandshakePauseUntil - Date.now()) / 1000);
+                console.log(`[HALT] Global handshake priority. Pausing broadcasts for ${remaining}s...`);
+                await wait(5000);
                 continue;
             }
 
@@ -1045,9 +1088,12 @@ async function startBroadcastProcessor() {
             }
 
             const entry = socketPool.get(broadcast.instanceId);
-            if (entry) {
-                entry.lastBroadcastActivity = Date.now();
+            if (!entry || entry.isPaused) {
+                console.warn(`[BROADCAST] Instance ${broadcast.instanceId} is paused or missing (${entry?.pauseReason}). Skipping.`);
+                await wait(5000);
+                continue;
             }
+            entry.lastBroadcastActivity = Date.now();
 
             // ── Campaign Global Timeout ──────────────────────────
             if (lastBroadcastId !== broadcast.id) {
@@ -1057,8 +1103,11 @@ async function startBroadcastProcessor() {
                 const maxCampaignDuration = 3 * 60 * 60 * 1000;
                 if (Date.now() - broadcastStartTime > maxCampaignDuration) {
                     console.error(`[TIMEOUT] Broadcast ${broadcast.id} exceeded 3h timeout!`);
-                    broadcastHalted = true;
-                    process.exit(1);
+                    if (entry) {
+                        entry.isPaused = true;
+                        entry.pauseReason = 'Campaign 3h timeout exceeded';
+                    }
+                    continue;
                 }
             }
 
@@ -1120,7 +1169,7 @@ async function startBroadcastProcessor() {
                 const chunks = Math.ceil(sleepMs / 60000);
                 for (let i = 0; i < chunks; i++) {
                     await wait(Math.min(60000, sleepMs - i * 60000));
-                    if (broadcastHalted) break;
+                    if (entry?.isPaused) break;
                 }
 
                 try { await activeSock.sendPresenceUpdate('available'); } catch { /* */ }
@@ -1157,7 +1206,7 @@ async function startBroadcastProcessor() {
                     await wait(Math.min(fiveMin, sleepMs - i * fiveMin));
                     resetDailyCounterIfNeeded();
                     if (!isDailyLimitReached(dailyLimit)) break;
-                    if (broadcastHalted) break;
+                    if (entry?.isPaused) break;
                 }
 
                 await prisma.broadcast.update({
@@ -1323,14 +1372,17 @@ async function startBroadcastProcessor() {
                 console.error(`❌ Failed to send to ${jid}:`, err?.message || err);
 
                 if (isRateLimitError(err)) {
-                    broadcastHalted = true;
-                    haltReason = `Rate-limit on send: ${err?.message || 'Unknown'}`;
-                    await logAntiBanAction(broadcast.id, 'RATE_LIMIT_PAUSE', haltReason);
+                    if (entry) {
+                        entry.isPaused = true;
+                        entry.pauseReason = `Rate-limit on send: ${err?.message || 'Unknown'}`;
+                    }
+                    const reason = entry?.pauseReason || 'Rate-limit on send';
+                    await logAntiBanAction(broadcast.id, 'RATE_LIMIT_PAUSE', reason);
                     await prisma.broadcast.update({
                         where: { id: broadcast.id },
                         data: { status: 'PAUSED_RATE_LIMIT' },
                     });
-                    console.error(`[CRITICAL] 🛑 ${haltReason}`);
+                    console.error(`[CRITICAL] 🛑 ${reason}`);
                     messageStatusUpdated = true;
                     continue;
                 }
@@ -1380,9 +1432,7 @@ async function startBroadcastProcessor() {
         } catch (e: any) {
             console.error('Error in broadcast loop:', e);
             if (isRateLimitError(e)) {
-                broadcastHalted = true;
-                haltReason = `Fatal rate-limit: ${e?.message}`;
-                console.error(`[CRITICAL] 🛑 ${haltReason}`);
+                console.error(`[CRITICAL] 🛑 Fatal rate-limit: ${e?.message}`);
             }
             await wait(5000);
         }
@@ -1449,9 +1499,8 @@ async function startVerificationWorker() {
 
     while (true) {
         try {
-            // Use any connected socket for verification
             const sock = getAnyConnectedSocket();
-            if (!sock || broadcastHalted) {
+            if (!sock || Date.now() < globalHandshakePauseUntil) {
                 await wait(10000);
                 continue;
             }
@@ -1469,7 +1518,7 @@ async function startVerificationWorker() {
 
             for (const contact of pendingContacts) {
                 const currentSock = getAnyConnectedSocket();
-                if (!currentSock || broadcastHalted) break;
+                if (!currentSock || Date.now() < globalHandshakePauseUntil) break;
 
                 const jid = `${contact.phone}@s.whatsapp.net`;
                 let isRegistered = false;

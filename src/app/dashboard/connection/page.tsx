@@ -13,13 +13,35 @@ import {
     Smartphone,
     LogOut,
     QrCode,
-    Lock
+    Lock,
+    Play
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 
 export default function ConnectionPage() {
     const { instance, isLoading, refresh } = useStatus()
     const [isDisconnecting, setIsDisconnecting] = useState(false)
+    const [isConnecting, setIsConnecting] = useState(false)
+
+    const handleConnect = async () => {
+        if (!instance?.id) return
+
+        setIsConnecting(true)
+        try {
+            const res = await fetch('/api/instance/connect', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ instanceId: instance.id })
+            })
+            if (res.ok) {
+                setTimeout(refresh, 500)
+            }
+        } catch (err) {
+            console.error('Connect failed:', err)
+        } finally {
+            setIsConnecting(false)
+        }
+    }
 
     const handleDisconnect = async () => {
         if (!confirm('Apakah Anda yakin ingin memutuskan koneksi WhatsApp? Anda harus scan QR ulang untuk menghubungkan kembali.')) return
@@ -193,10 +215,10 @@ export default function ConnectionPage() {
                                         <div className="h-6 w-6 border-2 border-slate-200 border-t-red-500 rounded-full animate-spin" />
                                     </div>
                                 </div>
-                            ) : instance ? (
+                            ) : instance?.status === 'INITIALIZING' ? (
                                 <div className="text-center space-y-4 max-w-sm animate-in fade-in duration-300">
                                     <div className="h-16 w-16 bg-blue-50 rounded-full flex items-center justify-center mx-auto border border-blue-100">
-                                        <QrCode className="h-8 w-8 text-blue-500" />
+                                        <QrCode className="h-8 w-8 text-blue-500 animate-pulse" />
                                     </div>
                                     <div className="space-y-2">
                                         <h3 className="text-lg font-bold text-slate-900">Mempersiapkan QR Code</h3>
@@ -207,6 +229,35 @@ export default function ConnectionPage() {
                                     <div className="flex justify-center pt-2">
                                         <div className="h-6 w-6 border-2 border-slate-200 border-t-blue-500 rounded-full animate-spin" />
                                     </div>
+                                </div>
+                            ) : instance?.status === 'DISCONNECTED' || instance ? (
+                                <div className="text-center space-y-6 max-w-sm animate-in fade-in duration-300">
+                                    <div className="h-16 w-16 bg-indigo-50 rounded-full flex items-center justify-center mx-auto border border-indigo-100">
+                                        <Play className="h-8 w-8 text-indigo-500 ml-1" />
+                                    </div>
+                                    <div className="space-y-2">
+                                        <h3 className="text-lg font-bold text-slate-900">Siap Dihubungkan</h3>
+                                        <p className="text-sm text-slate-500 leading-relaxed">
+                                            Klik tombol di bawah ini untuk menginisiasi handshake WhatsApp dan menghasilkan QR Code baru.
+                                        </p>
+                                    </div>
+                                    <Button
+                                        onClick={handleConnect}
+                                        disabled={isConnecting}
+                                        className="w-full bg-indigo-600 hover:bg-indigo-700 text-white shadow-md shadow-indigo-600/20"
+                                    >
+                                        {isConnecting ? (
+                                            <>
+                                                <RefreshCw className="h-4 w-4 mr-2 animate-spin" />
+                                                Memproses...
+                                            </>
+                                        ) : (
+                                            <>
+                                                <QrCode className="h-4 w-4 mr-2" />
+                                                Buat QR Code
+                                            </>
+                                        )}
+                                    </Button>
                                 </div>
                             ) : (
                                 <div className="text-center space-y-4 max-w-sm">

@@ -1,8 +1,7 @@
 "use client"
 
 import React, { createContext, useContext, useEffect, useState } from "react"
-
-export type InstanceStatus = "DISCONNECTED" | "QR_READY" | "CONNECTED" | "DISCONNECTING" | "restoring"
+export type InstanceStatus = "DISCONNECTED" | "INITIALIZING" | "QR_READY" | "CONNECTED" | "DISCONNECTING" | "restoring"
 
 interface Instance {
     id: string
