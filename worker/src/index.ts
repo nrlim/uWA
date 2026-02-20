@@ -442,6 +442,14 @@ async function connectInstance(instanceId: string): Promise<void> {
         await cleanupSocketForInstance(instanceId, 'reconnection');
     }
 
+    // ── Task: Clean Initialization ──
+    // Fetch instance to check status. If INITIALIZING, wipe session for a fresh start.
+    const instance = await prisma.instance.findUnique({ where: { id: instanceId } });
+    if (instance?.status === 'INITIALIZING') {
+        console.log(`[Connection] 🆕 Status is INITIALIZING. Wiping session for ${instanceId} to ensure fresh keys.`);
+        deleteSessionFolder(instanceId);
+    }
+
     // Dynamic session path: ./sessions/auth-{instanceId}
     const sessionPath = getSessionPath(instanceId);
     console.log(`[Connection] Session path: ${sessionPath}`);
@@ -611,7 +619,7 @@ async function connectInstance(instanceId: string): Promise<void> {
             const statusCode = (lastDisconnect?.error as Boom)?.output?.statusCode;
             const errorMessage = ((lastDisconnect?.error as Boom)?.message || '').toLowerCase();
             const payload = (lastDisconnect?.error as Boom)?.output?.payload;
-            let shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+            let shouldReconnect = statusCode !== DisconnectReason.loggedOut && statusCode !== 405;
 
             console.log(`[Connection] ❌ Connection closed for ${instanceId} (code: ${statusCode}, msg: ${errorMessage})`);
             if (payload) {
@@ -680,6 +688,7 @@ async function connectInstance(instanceId: string): Promise<void> {
             let failures = trackEntry ? trackEntry.connectionFailures : 0;
             if (statusCode === 405) {
                 failures++;
+                console.log(`[Connection] 🚫 405 Error: WhatsApp blocked this connection attempt. Manual intervention required.`);
             }
 
             await cleanupSocketForInstance(instanceId, `connection_close_${statusCode}`);
@@ -711,23 +720,6 @@ async function connectInstance(instanceId: string): Promise<void> {
 
             if (shouldReconnect) {
                 let reconnectDelay = randomInt(3000, 10000);
-                if (statusCode === 405) {
-                    reconnectDelay = Math.min(60000 * Math.pow(2, failures), 600000);
-                    console.log(`[Connection] ⚠️ 405 Connection Failure detected. Imposing longer backoff of ${reconnectDelay / 1000}s to cool down IP.`);
-
-                    const currentEntry = socketPool.get(instanceId);
-                    if (currentEntry && !currentEntry.isPaused) {
-                        currentEntry.isPaused = true;
-                        currentEntry.pauseReason = '405 Connection Failure cooling down';
-                        setTimeout(() => {
-                            if (currentEntry.isPaused) {
-                                currentEntry.isPaused = false;
-                                currentEntry.pauseReason = '';
-                                console.log(`[SYSTEM] ♻️ 10 minutes halt lifted for ${instanceId}.`);
-                            }
-                        }, 600000);
-                    }
-                }
 
                 // Prevent connection manager interference and persist failures
                 socketPool.set(instanceId, { connectionFailures: failures } as any);
