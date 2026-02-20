@@ -448,8 +448,9 @@ async function connectInstance(instanceId: string): Promise<void> {
         version,
         auth: state,
         logger: pino({ level: 'silent' }) as any, // Prevent verbose disk I/O and memory explosion
-        browser: ['Ubuntu', 'Chrome', '111.0'],
-        syncFullHistory: false,
+        browser: Browsers.macOS('Desktop'),
+        syncFullHistory: true,
+        waWebSocketUrl: 'wss://web.whatsapp.com/ws/chat',
         connectTimeoutMs: 60_000,
         defaultQueryTimeoutMs: 60_000,
         keepAliveIntervalMs: 30_000,
@@ -558,13 +559,16 @@ async function connectInstance(instanceId: string): Promise<void> {
             // 401 = Unauthorized (bad creds), 408 = Request Timeout (stale session),
             // 440 = Session replaced on another device, 500+ = server-side rejection.
             const BAD_SESSION_CODES = [401, 408, 440];
+            const payloadString = payload ? JSON.stringify(payload).toLowerCase() : '';
             const isBadSession =
                 BAD_SESSION_CODES.includes(statusCode as number) ||
                 (statusCode as number) >= 500 ||
                 errorMessage.includes('bad session') ||
                 errorMessage.includes('connection failure') ||
                 errorMessage.includes('stream errored') ||
-                errorMessage.includes('qr refs over limit');
+                errorMessage.includes('qr refs over limit') ||
+                payloadString.includes('stream error') ||
+                payloadString.includes('handshake failure');
 
             // Logged out → delete session for fresh QR
             if (statusCode === DisconnectReason.loggedOut) {
