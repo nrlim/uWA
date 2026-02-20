@@ -1,6 +1,6 @@
 import 'dotenv/config';
 
-import makeWASocket, { DisconnectReason, useMultiFileAuthState, Browsers, fetchLatestWaWebVersion } from '@whiskeysockets/baileys';
+import makeWASocket, { DisconnectReason, useMultiFileAuthState, Browsers } from '@whiskeysockets/baileys';
 import { Boom } from '@hapi/boom';
 import { PrismaClient } from '@prisma/client';
 import pino from 'pino';
@@ -437,32 +437,17 @@ async function connectInstance(instanceId: string): Promise<void> {
 
     const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
 
-    // ── Fetch latest WA Web version for protocol compatibility ──
-    let waVersion: [number, number, number] | undefined;
-    try {
-        const versionResult = await fetchLatestWaWebVersion();
-        if (versionResult.isLatest) {
-            waVersion = versionResult.version as [number, number, number];
-            console.log(`[Connection] Using latest WA Web version: ${waVersion.join('.')}`);
-        } else {
-            console.log(`[Connection] Could not fetch latest version, using Baileys default`);
-        }
-    } catch (err) {
-        console.warn(`[Connection] Version fetch failed, using default:`, err);
-    }
-
     // ── Browser identity + socket options ──
-    // IMPORTANT: browser[0] MUST be a recognized OS ('Ubuntu', 'Mac OS', 'Windows')
-    // because Baileys' validate-connection.js uses it to set WebSubPlatform.
-    // Unrecognized values cause WhatsApp to reject the pairing handshake.
+    // IMPORTANT: syncFullHistory MUST be true for WhatsApp to accept macOS/Desktop companions.
+    // Without it, the mobile app rejects the pairing with "check your phone internet connection".
     const sock = makeWASocket({
         auth: state,
         logger: pino({ level: 'warn' }) as any,
-        browser: Browsers.ubuntu('Chrome'),
-        syncFullHistory: false,
+        browser: Browsers.macOS('Desktop'),
+        syncFullHistory: true,
         connectTimeoutMs: 60_000,
         printQRInTerminal: false,
-        ...(waVersion ? { version: waVersion } : {}),
+        getMessage: async () => undefined,
     });
 
     // Register in socket pool
@@ -792,8 +777,8 @@ async function applyBatchCoolingIfNeeded(broadcastId: string, sock: any): Promis
 async function startBroadcastProcessor() {
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
     console.log('🚀 Anti-Ban Broadcast Processor v4.1 (Multi-Tenant)');
-    console.log('   ├─ Browser Identity: Ubuntu/Chrome ✓');
-    console.log('   ├─ Dynamic WA Web Version Fetch ✓');
+    console.log('   ├─ Browser Identity: Mac OS/Desktop ✓');
+    console.log('   ├─ syncFullHistory: true (Required for Pairing) ✓');
     console.log('   ├─ creds.json Pre-Validation ✓');
     console.log('   ├─ Bad Session Auto-Cleanup (401/408/440/5xx) ✓');
     console.log('   ├─ Connect Timeout: 60s ✓');
