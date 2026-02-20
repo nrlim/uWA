@@ -47,6 +47,23 @@ export async function POST(req: Request) {
             return NextResponse.json({ error: 'Tidak ada koneksi WhatsApp yang tersedia. Harap hubungkan perangkat Anda terlebih dahulu.' }, { status: 400 });
         }
 
+        // Zero-Waste Broadcasting Enforcement: ensure all recipients are VERIFIED contacts belonging to this user
+        const validContacts = await prisma.contact.findMany({
+            where: {
+                userId,
+                phone: { in: recipients },
+                status: 'VERIFIED'
+            },
+            select: { phone: true }
+        });
+
+        const verifiedPhones = new Set(validContacts.map((c: any) => c.phone));
+        const filteredRecipients = recipients.filter((r: string) => verifiedPhones.has(r));
+
+        if (filteredRecipients.length === 0) {
+            return NextResponse.json({ error: 'Tidak ada kontak VERIFIED yang valid dalam daftar penerima.' }, { status: 400 });
+        }
+
         const broadcast = await prisma.broadcast.create({
             data: {
                 name,
@@ -63,7 +80,7 @@ export async function POST(req: Request) {
                 user: { connect: { id: userId } }, // Link to the user
                 instance: { connect: { id: instance.id } }, // Link to the instance
                 messages: {
-                    create: recipients.map((r: string) => ({
+                    create: filteredRecipients.map((r: string) => ({
                         recipient: r,
                         status: 'PENDING',
                         imageUrl, // Store in message for redundancy if needed

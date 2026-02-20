@@ -1178,6 +1178,63 @@ function startDisconnectWatcher(): void {
 }
 
 // ============================================================================
+// 16.5 VERIFICATION WORKER (Background Queue)
+// ============================================================================
+
+async function startVerificationWorker() {
+    console.log('[VERIFICATION WORKER] Started — listening for PENDING contacts.');
+
+    while (true) {
+        try {
+            if (!globalSock || broadcastHalted) {
+                await wait(10000);
+                continue;
+            }
+
+            // Limit batch to 50 for memory safety
+            const pendingContacts = await prisma.contact.findMany({
+                where: { status: 'PENDING' },
+                orderBy: { createdAt: 'asc' },
+                take: 50,
+            });
+
+            if (pendingContacts.length === 0) {
+                await wait(5000);
+                continue;
+            }
+
+            for (const contact of pendingContacts) {
+                if (!globalSock || broadcastHalted) break;
+
+                const jid = `${contact.phone}@s.whatsapp.net`;
+                let isRegistered = false;
+
+                try {
+                    const [result] = await globalSock.onWhatsApp(jid);
+                    isRegistered = result?.exists || false;
+                } catch (err: any) {
+                    console.error(`[VERIFICATION] Check failed for ${contact.phone}`, err.message);
+                    await wait(2000);
+                    continue; // Leave as PENDING to retry later, skip updating
+                }
+
+                await prisma.contact.update({
+                    where: { id: contact.id },
+                    data: { status: isRegistered ? 'VERIFIED' : 'INVALID' },
+                });
+
+                // Small delay between checks to avoid rate limits
+                await wait(200 + randomInt(100, 300));
+            }
+
+        } catch (err) {
+            console.error('[VERIFICATION WORKER] Main loop error:', err);
+            await wait(10000);
+        }
+    }
+}
+
+// ============================================================================
 // 17. MAIN EXECUTION
 // ============================================================================
 
@@ -1195,6 +1252,7 @@ function startDisconnectWatcher(): void {
 
         await connectToWhatsApp();
         startBroadcastProcessor();
+        startVerificationWorker();
         startDisconnectWatcher();
     } catch (e: any) {
         if (e.message === 'NO_USERS_FOUND') {

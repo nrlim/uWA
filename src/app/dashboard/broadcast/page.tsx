@@ -14,6 +14,7 @@ import {
     DialogContent,
     DialogHeader,
     DialogTitle,
+    DialogDescription,
     DialogFooter
 } from "@/components/ui/dialog"
 import {
@@ -32,7 +33,8 @@ import {
     Clock,
     ShieldAlert,
     Upload,
-    Trash2
+    Trash2,
+    Search
 } from "lucide-react"
 import { useRouter } from "next/navigation"
 
@@ -59,6 +61,13 @@ export default function BroadcastPage() {
     const [activeTab, setActiveTab] = useState("manual")
     const [showAdvanced, setShowAdvanced] = useState(false)
 
+    // Contacts Picker State
+    const [isContactModalOpen, setIsContactModalOpen] = useState(false)
+    const [verifiedContacts, setVerifiedContacts] = useState<any[]>([])
+    const [contactSearch, setContactSearch] = useState("")
+    const [selectedContactIds, setSelectedContactIds] = useState<Set<string>>(new Set())
+    const [isFetchingContacts, setIsFetchingContacts] = useState(false)
+
     // Template State
     const [templates, setTemplates] = useState<{ id: string; title: string; content: string }[]>([])
     const [saveTemplateOpen, setSaveTemplateOpen] = useState(false)
@@ -77,7 +86,33 @@ export default function BroadcastPage() {
             .then(res => res.json())
             .then(data => { if (Array.isArray(data)) setTemplates(data) })
             .catch(() => { })
+            .catch(() => { })
     }, [])
+
+    useEffect(() => {
+        const fetchVerifiedContacts = async () => {
+            setIsFetchingContacts(true)
+            try {
+                const url = new URL("/api/contacts", window.location.origin)
+                url.searchParams.set("status", "VERIFIED")
+                if (contactSearch) url.searchParams.set("search", contactSearch)
+
+                const res = await fetch(url.toString())
+                if (res.ok) {
+                    const data = await res.json()
+                    setVerifiedContacts(data)
+                }
+            } catch (e) {
+                console.error(e)
+            } finally {
+                setIsFetchingContacts(false)
+            }
+        }
+
+        if (isContactModalOpen) {
+            fetchVerifiedContacts()
+        }
+    }, [isContactModalOpen, contactSearch])
 
     // Handle File Upload
     const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -485,48 +520,18 @@ export default function BroadcastPage() {
                             </CardTitle>
                         </CardHeader>
                         <CardContent className="p-6">
-                            <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
-                                <TabsList className="grid w-full grid-cols-2 mb-6 bg-slate-100 p-1 rounded-lg">
-                                    <TabsTrigger value="manual" className="text-xs font-medium rounded-md">Input Manual</TabsTrigger>
-                                    <TabsTrigger value="upload" className="text-xs font-medium rounded-md">Upload File</TabsTrigger>
-                                </TabsList>
-
-                                <TabsContent value="manual" className="mt-0">
-                                    <Textarea
-                                        placeholder="Tempel nomor telepon di sini (satu per baris)..."
-                                        className="min-h-[120px] border-slate-200 font-mono text-sm leading-relaxed rounded-xl focus:ring-blue-500/10"
-                                        onChange={(e) => {
-                                            const text = e.target.value;
-                                            const rawNumbers = text.match(/[\d\+\-\(\)\s]+/g) || [];
-                                            const cleaned = rawNumbers.map(n => n.replace(/\D/g, "")).filter(n => n.length >= 10);
-                                            setContacts(Array.from(new Set(cleaned)));
-                                        }}
-                                        disabled={isLocked}
-                                    />
-                                    <p className="text-[10px] text-slate-400 text-right mt-2">
-                                        Mendukung format +62, 08, 62.
-                                    </p>
-                                </TabsContent>
-
-                                <TabsContent value="upload" className="mt-0">
-                                    <div className="border-2 border-dashed border-slate-200 rounded-xl p-8 text-center hover:bg-slate-50/50 hover:border-blue-400 transition-all cursor-pointer relative group">
-                                        <Input
-                                            type="file"
-                                            className="absolute inset-0 opacity-0 cursor-pointer z-10 w-full h-full"
-                                            accept=".txt,.csv"
-                                            onChange={handleFileUpload}
-                                            disabled={isLocked}
-                                        />
-                                        <div className="h-12 w-12 bg-blue-50 rounded-full flex items-center justify-center mx-auto mb-3 group-hover:scale-110 transition-transform">
-                                            <Upload className="h-5 w-5 text-blue-600" />
-                                        </div>
-                                        <p className="font-semibold text-slate-900 text-sm group-hover:text-blue-700">
-                                            {file ? file.name : "Klik untuk upload file kontak"}
-                                        </p>
-                                        <p className="text-xs text-slate-500 mt-1">Format .csv atau .txt (Maks 10MB)</p>
-                                    </div>
-                                </TabsContent>
-                            </Tabs>
+                            <div className="border border-slate-200 rounded-xl p-6 text-center bg-slate-50 flex flex-col items-center justify-center space-y-3">
+                                <div className="h-12 w-12 bg-blue-100 rounded-full flex items-center justify-center text-blue-600">
+                                    <Users className="h-6 w-6" />
+                                </div>
+                                <div>
+                                    <h3 className="font-semibold text-slate-900">Pilih dari Database Kontak</h3>
+                                    <p className="text-xs text-slate-500 mt-1">Gunakan nomor yang telah diverifikasi untuk menjamin keamanan broadcast.</p>
+                                </div>
+                                <Button onClick={() => setIsContactModalOpen(true)} className="bg-blue-600 hover:bg-blue-700 mt-2" disabled={isLocked}>
+                                    Cari & Pilih Kontak
+                                </Button>
+                            </div>
 
                             {/* Audience Summary */}
                             {contacts.length > 0 && (
@@ -792,6 +797,111 @@ export default function BroadcastPage() {
                                 <><Save className="h-4 w-4 mr-2" /> Simpan Template</>
                             )}
                         </Button>
+                    </DialogFooter>
+                </DialogContent>
+            </Dialog>
+
+            {/* Contact Picker Dialog */}
+            <Dialog open={isContactModalOpen} onOpenChange={setIsContactModalOpen}>
+                <DialogContent className="max-w-2xl max-h-[85vh] flex flex-col p-0 overflow-hidden">
+                    <DialogHeader className="p-6 border-b border-slate-100 pb-4">
+                        <DialogTitle>Pilih Kontak Terverifikasi</DialogTitle>
+                        <DialogDescription>Kontak dengan status VERIFIED yang aman untuk di-broadcast.</DialogDescription>
+                    </DialogHeader>
+
+                    <div className="px-6 py-2 border-b border-slate-100 bg-slate-50 flex gap-2">
+                        <div className="relative flex-1">
+                            <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-slate-400" />
+                            <Input
+                                placeholder="Cari nama, tag, atau nomor..."
+                                className="pl-9 bg-white"
+                                value={contactSearch}
+                                onChange={(e) => setContactSearch(e.target.value)}
+                            />
+                        </div>
+                        <Button
+                            variant="outline"
+                            className="bg-white"
+                            onClick={() => {
+                                if (selectedContactIds.size === verifiedContacts.length && verifiedContacts.length > 0) {
+                                    setSelectedContactIds(new Set())
+                                } else {
+                                    setSelectedContactIds(new Set(verifiedContacts.map(c => c.phone)))
+                                }
+                            }}
+                        >
+                            {selectedContactIds.size === verifiedContacts.length && verifiedContacts.length > 0 ? "Batal Semua" : "Pilih Semua"}
+                        </Button>
+                    </div>
+
+                    <div className="flex-1 overflow-y-auto p-4 space-y-2 min-h-[300px] max-h-[50vh] bg-slate-50/50">
+                        {isFetchingContacts ? (
+                            <div className="flex flex-col items-center justify-center h-full space-y-2 text-slate-400">
+                                <Loader2 className="h-8 w-8 animate-spin" />
+                                <span className="text-xs">Memuat kontak...</span>
+                            </div>
+                        ) : verifiedContacts.length === 0 ? (
+                            <div className="flex flex-col items-center justify-center h-full text-slate-500">
+                                <Users className="h-10 w-10 text-slate-300 mb-2" />
+                                <p className="text-sm font-medium">Tidak ada kontak ditemukan.</p>
+                                <p className="text-xs text-slate-400">Upload dan verifikasi kontak di menu Manajemen Kontak.</p>
+                            </div>
+                        ) : (
+                            verifiedContacts.map((c) => (
+                                <div
+                                    key={c.id}
+                                    onClick={() => {
+                                        const next = new Set(selectedContactIds)
+                                        if (next.has(c.phone)) next.delete(c.phone)
+                                        else next.add(c.phone)
+                                        setSelectedContactIds(next)
+                                    }}
+                                    className={`flex items-center gap-3 p-3 bg-white border rounded-xl cursor-pointer transition-colors shadow-sm ${selectedContactIds.has(c.phone) ? 'border-blue-500 ring-1 ring-blue-500/20' : 'border-slate-200 hover:border-slate-300'}`}
+                                >
+                                    <div className="flex-shrink-0">
+                                        <div className={`w-5 h-5 rounded-md border flex items-center justify-center transition-colors ${selectedContactIds.has(c.phone) ? 'bg-blue-600 border-blue-600' : 'border-slate-300 bg-white'}`}>
+                                            {selectedContactIds.has(c.phone) && <CheckCircle2 className="w-3.5 h-3.5 text-white" />}
+                                        </div>
+                                    </div>
+                                    <div className="flex-1 min-w-0">
+                                        <div className="flex items-center gap-2">
+                                            <p className="text-sm font-semibold text-slate-900 truncate">
+                                                {c.name || c.phone}
+                                            </p>
+                                            {c.name && <span className="text-xs text-slate-400 font-mono">{c.phone}</span>}
+                                        </div>
+                                        {c.tags && (
+                                            <div className="flex gap-1 mt-1">
+                                                {c.tags.split(',').map((tag: string, i: number) => (
+                                                    <Badge key={i} variant="secondary" className="text-[9px] px-1.5 py-0 h-4 bg-slate-100 text-slate-600">{tag.trim()}</Badge>
+                                                ))}
+                                            </div>
+                                        )}
+                                    </div>
+                                </div>
+                            ))
+                        )}
+                    </div>
+
+                    <DialogFooter className="p-4 border-t border-slate-100 bg-white">
+                        <div className="flex items-center justify-between w-full">
+                            <div className="text-sm text-slate-500 font-medium">
+                                <span className="text-slate-900 font-bold">{selectedContactIds.size}</span> terpilih
+                            </div>
+                            <div className="flex gap-2">
+                                <Button variant="ghost" onClick={() => setIsContactModalOpen(false)}>Batal</Button>
+                                <Button
+                                    onClick={() => {
+                                        setContacts(Array.from(selectedContactIds));
+                                        setIsContactModalOpen(false);
+                                    }}
+                                    className="bg-blue-600 hover:bg-blue-700 text-white"
+                                    disabled={selectedContactIds.size === 0}
+                                >
+                                    Gunakan Kontak
+                                </Button>
+                            </div>
+                        </div>
                     </DialogFooter>
                 </DialogContent>
             </Dialog>

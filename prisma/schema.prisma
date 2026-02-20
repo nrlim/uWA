@@ -105,6 +105,7 @@ model User {
   broadcasts    Broadcast[]
   templates     Template[]
   settings      Settings?
+  contacts      Contact[]
 }
 
 model Settings {
@@ -116,4 +117,18 @@ model Settings {
   workingHourEnd   Int      @default(23)
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
+}
+
+model Contact {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  phone     String
+  name      String?
+  status    String   @default("PENDING") // PENDING, VERIFIED, INVALID
+  tags      String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([userId, phone])
 }

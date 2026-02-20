@@ -10,12 +10,14 @@ import {
     Settings,
     LogOut,
     MessageCircle,
-    FileText
+    FileText,
+    Users
 } from "lucide-react"
 
 const menuItems = [
     { name: "Dashboard", icon: LayoutDashboard, href: "/dashboard" },
     { name: "Connection", icon: Smartphone, href: "/dashboard/connection" },
+    { name: "Contacts", icon: Users, href: "/dashboard/contacts" },
     { name: "Broadcast", icon: Radio, href: "/dashboard/broadcast" },
     { name: "Templates", icon: FileText, href: "/dashboard/templates" },
     { name: "History", icon: History, href: "/dashboard/history" },

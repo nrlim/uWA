@@ -18,15 +18,16 @@ export function normalizePhone(input: string): string {
         clean = '62' + clean;
     }
 
-    // 3. Ensure the final format starts with '62'
-    if (!clean.startsWith('62')) {
-        // If it doesn't start with 62 (and wasn't 08 or 8..), we assume it's missing country code
-        // or user input full intl format without + (e.g. 12345).
-        // However, to be strict as requested: "Ensure the final format is always a string of numbers starting with '62'."
-        // If it's empty, return empty (so validation can catch "required").
-        if (clean.length > 0) {
-            clean = '62' + clean;
-        }
+    // Add 62 if it doesn't have it and it's long enough to be an ID number without country code
+    // Example: user enters 812345... but it didn't trigger above (already covered)
+    // But if someone enters something else, we let it be and validate length below.
+    if (!clean.startsWith('62') && clean.length > 0) {
+        clean = '62' + clean; // Forcing 62 per spec
+    }
+
+    // 3. Validate length (10 to 15 digits) and starts with 62
+    if (!clean.startsWith('62') || clean.length < 10 || clean.length > 15) {
+        return ''; // Return empty string for invalid numbers so callers can skip
     }
 
     return clean;
