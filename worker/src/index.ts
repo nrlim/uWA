@@ -27,6 +27,7 @@ interface SocketEntry {
     sock: any;
     instanceId: string;
     qrTimeout: ReturnType<typeof setTimeout> | null;
+    connectingTimeout?: ReturnType<typeof setTimeout> | null;
     qrAttempts: number;
     presenceInterval: ReturnType<typeof setTimeout> | null;
     connectionFailures: number;
@@ -357,6 +358,11 @@ async function cleanupSocketForInstance(instanceId: string, reason: string): Pro
         entry.qrTimeout = null;
     }
 
+    if (entry.connectingTimeout) {
+        clearTimeout(entry.connectingTimeout);
+        entry.connectingTimeout = null;
+    }
+
     stopPresenceHeartbeat(instanceId);
 
     if (entry.sock) {
@@ -467,8 +473,8 @@ async function connectInstance(instanceId: string): Promise<void> {
         linkPreviewImageThumbnailWidth: 192,
         generateHighQualityLinkPreview: true,
         waWebSocketUrl: 'wss://web.whatsapp.com/ws/chat',
-        connectTimeoutMs: 60_000,
-        defaultQueryTimeoutMs: 60_000,
+        connectTimeoutMs: 30_000,
+        defaultQueryTimeoutMs: 30_000,
         keepAliveIntervalMs: 30_000,
         printQRInTerminal: false,
         getMessage: async () => undefined,
@@ -495,6 +501,28 @@ async function connectInstance(instanceId: string): Promise<void> {
 
         console.log(`[Connection] Current State: ${connection || 'unchanged'} | Instance: ${instanceId}`);
 
+        if (connection === 'connecting') {
+            const entry = socketPool.get(instanceId);
+            if (entry) {
+                if (entry.connectingTimeout) {
+                    clearTimeout(entry.connectingTimeout);
+                }
+                entry.connectingTimeout = setTimeout(async () => {
+                    const currentEntry = socketPool.get(instanceId);
+                    if (currentEntry) {
+                        console.log(`[Connection] ⚠️ Stuck in connecting for > 45s. Forcing restart for ${instanceId}.`);
+                        await cleanupSocketForInstance(instanceId, 'connecting_timeout');
+                        try {
+                            await prisma.instance.update({
+                                where: { id: instanceId },
+                                data: { status: 'DISCONNECTED', qrCode: '' },
+                            });
+                        } catch { }
+                    }
+                }, 45000);
+            }
+        }
+
         // ── QR Code Received ──────────────────────────────────
         if (qr) {
             const entry = socketPool.get(instanceId);
@@ -515,8 +543,8 @@ async function connectInstance(instanceId: string): Promise<void> {
                     return; // Stop further processing
                 }
 
-                // Clear previous QR timeout properly on attempt #1 to avoid race conditions
-                if (entry.qrAttempts === 1 && entry.qrTimeout) {
+                // Clear previous QR timeout properly to avoid race conditions
+                if (entry.qrTimeout) {
                     clearTimeout(entry.qrTimeout);
                     entry.qrTimeout = null;
                 }
@@ -532,32 +560,30 @@ async function connectInstance(instanceId: string): Promise<void> {
                     console.error(`[Connection] ❌ Failed to save QR for ${instanceId}:`, error);
                 }
 
-                // QR Timeout: start guard only on first attempt
-                if (entry.qrAttempts === 1) {
-                    entry.qrTimeout = setTimeout(async () => {
-                        const currentEntry = socketPool.get(instanceId);
-                        if (!currentEntry) return;
+                // QR Timeout: start guard
+                entry.qrTimeout = setTimeout(async () => {
+                    const currentEntry = socketPool.get(instanceId);
+                    if (!currentEntry) return;
 
-                        console.log(`[Connection] ⏰ QR timeout (${QR_TIMEOUT_MS / 1000}s) for ${instanceId}. Attempt #${currentEntry.qrAttempts}`);
+                    console.log(`[Connection] ⏰ QR timeout (${QR_TIMEOUT_MS / 1000}s) for ${instanceId}. Attempt #${currentEntry.qrAttempts}`);
 
-                        // After 6 failed attempts (6 QR cycles), close and retry cleanly
-                        if (currentEntry.qrAttempts >= 6) {
-                            console.log(`[Connection] ⚠️ QR not scanned after ${currentEntry.qrAttempts} attempts for ${instanceId}. Closing for retry.`);
+                    // After 6 failed attempts (6 QR cycles), close and retry cleanly
+                    if (currentEntry.qrAttempts >= 6) {
+                        console.log(`[Connection] ⚠️ QR not scanned after ${currentEntry.qrAttempts} attempts for ${instanceId}. Closing for retry.`);
 
-                            await cleanupSocketForInstance(instanceId, 'qr_timeout_max_attempts');
+                        await cleanupSocketForInstance(instanceId, 'qr_timeout_max_attempts');
 
-                            try {
-                                await prisma.instance.update({
-                                    where: { id: instanceId },
-                                    data: { status: 'DISCONNECTED', qrCode: '' },
-                                });
-                            } catch { /* ignore */ }
+                        try {
+                            await prisma.instance.update({
+                                where: { id: instanceId },
+                                data: { status: 'DISCONNECTED', qrCode: '' },
+                            });
+                        } catch { /* ignore */ }
 
-                            // The connection manager will pick this up and retry automatically
-                        }
-                        // < 6 attempts: Baileys will auto-generate new QR
-                    }, QR_TIMEOUT_MS);
-                }
+                        // The connection manager will pick this up and retry automatically
+                    }
+                    // < 6 attempts: Baileys will auto-generate new QR
+                }, QR_TIMEOUT_MS);
             }
         }
 
@@ -684,12 +710,16 @@ async function connectInstance(instanceId: string): Promise<void> {
         if (connection === 'open') {
             console.log(`[Connection] ✅ Connection opened for ${instanceId}`);
 
-            // Clear QR timeout
+            // Clear timeouts
             const entry = socketPool.get(instanceId);
             if (entry) {
                 if (entry.qrTimeout) {
                     clearTimeout(entry.qrTimeout);
                     entry.qrTimeout = null;
+                }
+                if (entry.connectingTimeout) {
+                    clearTimeout(entry.connectingTimeout);
+                    entry.connectingTimeout = null;
                 }
                 entry.qrAttempts = 0;
                 entry.connectionFailures = 0; // Reset consecutive connection failures
