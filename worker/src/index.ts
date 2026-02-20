@@ -47,9 +47,6 @@ let batchMessageCount = 0;
 let dailySentCount = 0;
 let lastDailyResetDate = new Date().toDateString();
 
-// Handshake Priority Guard (Pauses broadcasts momentarily for pairing)
-let globalHandshakePauseUntil = 0;
-
 // Media Cache (Download once per campaign)
 let cachedBroadcastId: string | null = null;
 let cachedImageUrl: string | null = null;
@@ -832,10 +829,10 @@ async function startConnectionManager(): Promise<void> {
                 }
             }
 
-            // Find all instances that are INITIALIZING or QR_READY that need a connection
+            // Find all instances that are INITIALIZING that need a connection
             const candidates = await prisma.instance.findMany({
                 where: {
-                    status: { in: ['INITIALIZING', 'QR_READY'] },
+                    status: { in: ['INITIALIZING'] },
                     users: { some: {} } // Only instances that have at least 1 user linked
                 },
                 select: { id: true, phoneNumber: true, status: true, updatedAt: true },
@@ -843,21 +840,8 @@ async function startConnectionManager(): Promise<void> {
             });
 
             // Diagnostic: log scan results
-            const allInstances = await prisma.instance.findMany({
-                select: { id: true, status: true, phoneNumber: true }
-            });
-            console.log(`[CONNECTION MANAGER] Scan: ${allInstances.length} total instances, ${candidates.length} candidate(s), ${socketPool.size} in pool`);
-            if (allInstances.length > 0) {
-                for (const inst of allInstances) {
-                    const inPool = socketPool.has(inst.id) ? '✅ in pool' : '❌ not in pool';
-                    let displayStatus = inst.status;
-                    if (socketPool.has(inst.id) && inst.status === 'INITIALIZING') {
-                        displayStatus = 'CONNECTING...';
-                    }
-                    console.log(`[CONNECTION MANAGER]   │ ${inst.id} | status=${displayStatus} | phone=${inst.phoneNumber} | ${inPool}`);
-                }
-            } else {
-                console.log('[CONNECTION MANAGER]   ⚠️ No instances found in database! User must visit dashboard to auto-create one.');
+            if (candidates.length > 0) {
+                console.log(`[CONNECTION MANAGER] Scan: ${candidates.length} candidate(s) found. Pool Size: ${socketPool.size}`);
             }
 
             for (let i = 0; i < candidates.length; i++) {
@@ -881,29 +865,12 @@ async function startConnectionManager(): Promise<void> {
             for (const instance of candidates) {
                 const inPool = socketPool.has(instance.id);
 
-                // Connection Manager Intelligence: 
-                // if an instance is in the pool and its status is QR_READY, 
-                // do NOT attempt to reconnect it unless the QR has actually timed out (> 60s).
-                if (inPool && instance.status === 'QR_READY') {
-                    const updatedAtTime = new Date(instance.updatedAt).getTime();
-                    const ageSeconds = (Date.now() - updatedAtTime) / 1000;
-                    if (ageSeconds < 60) {
-                        continue; // Still valid QR in pool, skip reconnection
-                    }
-                    console.log(`[CONNECTION MANAGER] ⏰ QR for ${instance.id} timed out (${Math.round(ageSeconds)}s). Allowing refresh.`);
-                }
-
                 // Skip if already in pool and INITIALIZING (means socket is being set up / reconnecting)
                 if (inPool && instance.status === 'INITIALIZING') {
                     continue;
                 }
 
                 console.log(`[CONNECTION MANAGER] 🆕 Candidate instance found: ${instance.id} (${instance.phoneNumber}) | status: ${instance.status}`);
-
-                if (instance.status === 'INITIALIZING') {
-                    globalHandshakePauseUntil = Date.now() + 30000;
-                    console.log(`[CONNECTION MANAGER] ⏸️ Pausing all broadcasts for 30s to dedicate CPU/RAM for handshake of ${instance.id}.`);
-                }
 
                 // Memory check before spawning new socket
                 const mem = checkMemoryUsage();
@@ -1034,12 +1001,7 @@ async function startBroadcastProcessor() {
             }
 
             // ── Halt Check ────────────────────────────────────
-            if (Date.now() < globalHandshakePauseUntil) {
-                const remaining = Math.round((globalHandshakePauseUntil - Date.now()) / 1000);
-                console.log(`[HALT] Global handshake priority. Pausing broadcasts for ${remaining}s...`);
-                await wait(5000);
-                continue;
-            }
+            // Removed globalHandshakePause logic to allow full multi-tenant non-blocking payload streaming
 
             // ── Find Active Broadcast (across ALL connected instances) ──
             // Only pick broadcasts whose instance has an active socket
@@ -1500,7 +1462,7 @@ async function startVerificationWorker() {
     while (true) {
         try {
             const sock = getAnyConnectedSocket();
-            if (!sock || Date.now() < globalHandshakePauseUntil) {
+            if (!sock) {
                 await wait(10000);
                 continue;
             }
@@ -1518,7 +1480,7 @@ async function startVerificationWorker() {
 
             for (const contact of pendingContacts) {
                 const currentSock = getAnyConnectedSocket();
-                if (!currentSock || Date.now() < globalHandshakePauseUntil) break;
+                if (!currentSock) break;
 
                 const jid = `${contact.phone}@s.whatsapp.net`;
                 let isRegistered = false;
