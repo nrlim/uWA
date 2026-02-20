@@ -457,7 +457,7 @@ async function connectInstance(instanceId: string): Promise<void> {
     // Unrecognized values cause WhatsApp to reject the pairing handshake.
     const sock = makeWASocket({
         auth: state,
-        logger: pino({ level: 'silent' }) as any,
+        logger: pino({ level: 'warn' }) as any,
         browser: Browsers.ubuntu('Chrome'),
         syncFullHistory: false,
         connectTimeoutMs: 60_000,
@@ -675,6 +675,20 @@ async function startConnectionManager(): Promise<void> {
                 },
                 select: { id: true, phoneNumber: true }
             });
+
+            // Diagnostic: log scan results
+            const allInstances = await prisma.instance.findMany({
+                select: { id: true, status: true, phoneNumber: true }
+            });
+            console.log(`[CONNECTION MANAGER] Scan: ${allInstances.length} total instances, ${disconnectedInstances.length} DISCONNECTED, ${socketPool.size} in pool`);
+            if (allInstances.length > 0) {
+                for (const inst of allInstances) {
+                    const inPool = socketPool.has(inst.id) ? '✅ in pool' : '❌ not in pool';
+                    console.log(`[CONNECTION MANAGER]   │ ${inst.id} | status=${inst.status} | phone=${inst.phoneNumber} | ${inPool}`);
+                }
+            } else {
+                console.log('[CONNECTION MANAGER]   ⚠️ No instances found in database! User must visit dashboard to auto-create one.');
+            }
 
             for (const instance of disconnectedInstances) {
                 // Skip if already in pool (means socket is being set up / reconnecting)
