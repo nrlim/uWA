@@ -1,6 +1,7 @@
 "use client"
 
 import Link from "next/link"
+import Image from "next/image"
 import { usePathname } from "next/navigation"
 import {
     LayoutDashboard,
@@ -36,11 +37,11 @@ export function Sidebar({ userProfile }: { userProfile?: UserProfile | null }) {
     return (
         <aside className="fixed inset-y-0 left-0 z-50 w-64 bg-[#0f172a] text-slate-400 hidden md:flex flex-col border-r border-slate-800">
             {/* Brand */}
-            <div className="h-16 flex items-center px-6 border-b border-slate-800/50 gap-3">
-                <div className="h-8 w-8 bg-blue-600 rounded-lg flex items-center justify-center text-white shadow-lg shadow-blue-500/20">
-                    <MessageCircle className="h-5 w-5 fill-current" />
+            <div className="h-16 flex items-center px-6 border-b border-slate-800/50">
+                <div className="flex items-center justify-center -ml-3 -mr-2">
+                    <Image src="/images/main-logo.png" alt="uWA Logo" width={64} height={64} className="object-contain drop-shadow-md" />
                 </div>
-                <span className="font-semibold text-lg tracking-tight text-white/90">uWA Engine</span>
+                <span className="font-semibold text-lg tracking-tight text-white/90">uWA</span>
             </div>
 
             {/* Navigation */}

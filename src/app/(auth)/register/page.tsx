@@ -13,6 +13,7 @@ import {
     DialogTitle,
 } from '@/components/ui/dialog';
 import Link from 'next/link';
+import Image from 'next/image';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { ArrowLeft, CheckCircle, Eye, EyeOff, Loader2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
@@ -250,9 +251,9 @@ export default function RegisterPage() {
                 <div className="absolute inset-0 bg-[radial-gradient(circle_at_bottom_left,_var(--tw-gradient-stops))] from-teal-900/40 via-transparent to-transparent opacity-80 pointer-events-none"></div>
                 <div className="absolute top-0 right-0 w-96 h-96 bg-blue-600/10 rounded-full blur-3xl -mr-20 -mt-20"></div>
 
-                <div className="z-10 flex items-center gap-3">
-                    <div className="h-10 w-10 bg-white rounded-xl flex items-center justify-center text-slate-950 font-bold text-xl shadow-lg">
-                        u
+                <div className="z-10 flex items-center">
+                    <div className="flex items-center justify-center -ml-4 -mr-4">
+                        <Image src="/images/main-logo.png" alt="uWA Logo" width={96} height={96} className="object-contain drop-shadow-md" />
                     </div>
                     <span className="font-bold text-2xl tracking-tight text-white">uWA</span>
                 </div>

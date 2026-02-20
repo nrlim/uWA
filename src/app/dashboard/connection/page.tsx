@@ -56,7 +56,7 @@ export default function ConnectionPage() {
             <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-6 border-b border-slate-100">
                 <div>
                     <h1 className="text-2xl font-bold text-slate-900 tracking-tight">Manajemen Koneksi</h1>
-                    <p className="text-slate-500 text-sm mt-1">Kelola dan pantau hubungan antara uWA Engine dan WhatsApp Anda.</p>
+                    <p className="text-slate-500 text-sm mt-1">Kelola dan pantau hubungan antara uWA dan WhatsApp Anda.</p>
                 </div>
                 <Button
                     variant="outline"

@@ -14,6 +14,7 @@ import {
     CardTitle,
 } from '@/components/ui/card';
 import Link from 'next/link';
+import Image from 'next/image';
 import { useRouter } from 'next/navigation';
 import { ArrowLeft, CheckCircle, Eye, EyeOff, Loader2 } from 'lucide-react';
 import { normalizePhone } from '@/lib/utils';
@@ -79,9 +80,9 @@ export default function LoginPage() {
                 <div className="absolute inset-0 bg-[radial-gradient(circle_at_top_right,_var(--tw-gradient-stops))] from-blue-100/40 via-transparent to-transparent opacity-70 pointer-events-none"></div>
 
                 {/* Logo */}
-                <div className="z-10 flex items-center gap-3">
-                    <div className="h-10 w-10 bg-slate-900 rounded-xl flex items-center justify-center text-white font-bold text-xl shadow-lg">
-                        u
+                <div className="z-10 flex items-center">
+                    <div className="flex items-center justify-center -ml-4 -mr-4">
+                        <Image src="/images/main-logo.png" alt="uWA Logo" width={96} height={96} className="object-contain drop-shadow-md" />
                     </div>
                     <span className="font-bold text-2xl tracking-tight text-slate-900">uWA</span>
                 </div>
