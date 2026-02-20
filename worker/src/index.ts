@@ -22,9 +22,21 @@ async function getWorkerPhoneNumber(): Promise<string> {
         return cachedPhoneNumber;
     }
     const firstInstance = await prisma.instance.findFirst();
-    if (!firstInstance) throw new Error('No instances found. Provide WORKER_PHONE_NUMBER env var.');
-    cachedPhoneNumber = firstInstance.phoneNumber;
-    return cachedPhoneNumber;
+    if (firstInstance) {
+        cachedPhoneNumber = firstInstance.phoneNumber;
+        return cachedPhoneNumber;
+    }
+
+    // Fallback: Create one for the first registered user to break deadlock
+    const firstUser = await prisma.user.findFirst();
+    if (firstUser) {
+        cachedPhoneNumber = firstUser.phone;
+        return cachedPhoneNumber;
+    }
+
+    // No users and no instances. Sleep to prevent PM2 log flood, then throw handled error.
+    await new Promise(resolve => setTimeout(resolve, 30000)); // 30s delay
+    throw new Error('NO_USERS_FOUND');
 }
 
 let cachedInstanceId: string | null = null;
@@ -35,8 +47,13 @@ async function getWorkerInstanceId(): Promise<string> {
         where: { phoneNumber }
     });
     if (!instance) {
+        const user = await prisma.user.findFirst({ where: { phone: phoneNumber } });
         instance = await prisma.instance.create({
-            data: { phoneNumber, name: `Worker ${phoneNumber}` }
+            data: {
+                phoneNumber,
+                name: `WA ${phoneNumber}`,
+                users: user ? { connect: { id: user.id } } : undefined
+            }
         });
     }
     cachedInstanceId = instance.id;
@@ -1179,7 +1196,13 @@ function startDisconnectWatcher(): void {
         await connectToWhatsApp();
         startBroadcastProcessor();
         startDisconnectWatcher();
-    } catch (e) {
-        console.error('Fatal Error:', e);
+    } catch (e: any) {
+        if (e.message === 'NO_USERS_FOUND') {
+            console.log('⏳ Worker is sleeping. Waiting for at least 1 user/instance to be registered in the database...');
+            process.exit(0); // Exit cleanly so PM2 restarts quietly and hits the sleep delay again
+        } else {
+            console.error('Fatal Error:', e);
+            process.exit(1);
+        }
     }
 })();
