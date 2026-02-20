@@ -242,6 +242,12 @@ function checkMemoryUsage(): { usedMB: number; ok: boolean } {
     const usage = process.memoryUsage();
     const usedMB = Math.round(usage.heapUsed / 1024 / 1024);
     const ok = usedMB < MEMORY_LIMIT_MB * 0.85;
+
+    if (usedMB > 920) {
+        console.error(`[MEMORY GUARD] 🚨 RAM limit exceeded (${usedMB}MB). Triggering graceful shutdown.`);
+        gracefulShutdown('MEM_EXCEEDED');
+    }
+
     return { usedMB, ok };
 }
 
@@ -367,10 +373,17 @@ async function cleanupSocketForInstance(instanceId: string, reason: string): Pro
 
     if (entry.sock) {
         try {
+            // Priority 1: Extensive null-checks with optional chaining
             entry.sock?.ev?.removeAllListeners('creds.update');
             entry.sock?.ev?.removeAllListeners('connection.update');
-            entry.sock?.ws?.close();
-            entry.sock?.end?.(undefined);
+
+            if (entry.sock?.ws) {
+                entry.sock.ws.close();
+            }
+
+            if (typeof entry.sock?.end === 'function') {
+                entry.sock.end(undefined);
+            }
         } catch (err) { /* ignore cleanup errors */ }
     }
 
@@ -467,13 +480,13 @@ async function connectInstance(instanceId: string): Promise<void> {
         options: { headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36' } },
         syncFullHistory: false,
         shouldSyncHistoryMessage: () => false,
-        // @ts-ignore - Bypassing type checking for deprecated/custom fork property
+        // @ts-ignore - Aggressive Lite-Handshake to prevent memory spikes
         getNextSyncHistoryMessage: () => undefined,
         patchMessageBeforeSending: (message: any) => message,
         linkPreviewImageThumbnailWidth: 192,
         generateHighQualityLinkPreview: true,
         waWebSocketUrl: 'wss://web.whatsapp.com/ws/chat',
-        connectTimeoutMs: 30_000,
+        connectTimeoutMs: 45_000,
         defaultQueryTimeoutMs: 30_000,
         keepAliveIntervalMs: 30_000,
         printQRInTerminal: false,
@@ -795,13 +808,13 @@ async function startConnectionManager(): Promise<void> {
                 }
             }
 
-            // Find all instances that are DISCONNECTED and not already in our socket pool
-            const disconnectedInstances = await prisma.instance.findMany({
+            // Find all instances that are DISCONNECTED or QR_READY that need a connection
+            const candidates = await prisma.instance.findMany({
                 where: {
-                    status: 'DISCONNECTED',
+                    status: { in: ['DISCONNECTED', 'QR_READY'] },
                     users: { some: {} } // Only instances that have at least 1 user linked
                 },
-                select: { id: true, phoneNumber: true },
+                select: { id: true, phoneNumber: true, status: true, updatedAt: true },
                 take: 5 // Process max 5 at a time to prevent CPU/IO spikes during connection bursts
             });
 
@@ -809,7 +822,7 @@ async function startConnectionManager(): Promise<void> {
             const allInstances = await prisma.instance.findMany({
                 select: { id: true, status: true, phoneNumber: true }
             });
-            console.log(`[CONNECTION MANAGER] Scan: ${allInstances.length} total instances, ${disconnectedInstances.length} DISCONNECTED, ${socketPool.size} in pool`);
+            console.log(`[CONNECTION MANAGER] Scan: ${allInstances.length} total instances, ${candidates.length} candidate(s), ${socketPool.size} in pool`);
             if (allInstances.length > 0) {
                 for (const inst of allInstances) {
                     const inPool = socketPool.has(inst.id) ? '✅ in pool' : '❌ not in pool';
@@ -823,13 +836,27 @@ async function startConnectionManager(): Promise<void> {
                 console.log('[CONNECTION MANAGER]   ⚠️ No instances found in database! User must visit dashboard to auto-create one.');
             }
 
-            for (const instance of disconnectedInstances) {
-                // Skip if already in pool (means socket is being set up / reconnecting)
-                if (socketPool.has(instance.id)) {
+            for (const instance of candidates) {
+                const inPool = socketPool.has(instance.id);
+
+                // Connection Manager Intelligence: 
+                // if an instance is in the pool and its status is QR_READY, 
+                // do NOT attempt to reconnect it unless the QR has actually timed out (> 60s).
+                if (inPool && instance.status === 'QR_READY') {
+                    const updatedAtTime = new Date(instance.updatedAt).getTime();
+                    const ageSeconds = (Date.now() - updatedAtTime) / 1000;
+                    if (ageSeconds < 60) {
+                        continue; // Still valid QR in pool, skip reconnection
+                    }
+                    console.log(`[CONNECTION MANAGER] ⏰ QR for ${instance.id} timed out (${Math.round(ageSeconds)}s). Allowing refresh.`);
+                }
+
+                // Skip if already in pool and DISCONNECTED (means socket is being set up / reconnecting)
+                if (inPool && instance.status === 'DISCONNECTED') {
                     continue;
                 }
 
-                console.log(`[CONNECTION MANAGER] 🆕 New disconnected instance found: ${instance.id} (${instance.phoneNumber})`);
+                console.log(`[CONNECTION MANAGER] 🆕 Candidate instance found: ${instance.id} (${instance.phoneNumber}) | status: ${instance.status}`);
 
                 // Memory check before spawning new socket
                 const mem = checkMemoryUsage();
