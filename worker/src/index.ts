@@ -34,7 +34,10 @@ async function getWorkerUserId(): Promise<string> {
 // Global Socket Reference
 let globalSock: any = null;
 
-// Counters for cooldown logic
+// Track idle time and timeouts
+let lastActiveTime = Date.now();
+let lastBroadcastId: string | null = null;
+let broadcastStartTime = 0;
 let batchMessageCount = 0;
 let dailySentCount = 0;
 let lastDailyResetDate = new Date().toDateString();
@@ -48,6 +51,7 @@ let presenceHeartbeatInterval: ReturnType<typeof setInterval> | null = null;
 
 // Media Cache (Download once per campaign)
 let cachedBroadcastId: string | null = null;
+let cachedImageUrl: string | null = null;
 let cachedMediaBuffer: Buffer | null = null;
 
 // ============================================================================
@@ -634,9 +638,36 @@ async function startBroadcastProcessor() {
                 },
             });
 
+            // ── Idle Auto-Refresh (5 minutes) ─────────────────
+            // If no active broadcast is found, check how long we've been idle.
             if (!broadcast) {
+                const idleTime = Date.now() - lastActiveTime;
+                if (idleTime > 5 * 60 * 1000) {
+                    console.log(`[AUTO-REFRESH] Worker idle for 5+ minutes. Restarting process to free memory...`);
+                    await cleanupSocket('idle_refresh');
+                    process.exit(0); // PM2 will automatically restart this
+                }
                 await wait(5000);
                 continue;
+            }
+
+            // We have a broadcast to process, update last active
+            lastActiveTime = Date.now();
+
+            // ── Campaign Global Timeout ──────────────────────────
+            if (lastBroadcastId !== broadcast.id) {
+                lastBroadcastId = broadcast.id;
+                broadcastStartTime = Date.now();
+            } else {
+                // If the same broadcast is running, check if it's taking an unreasonable amount of time
+                // E.g., over 3 hours for one campaign without finishing
+                const maxCampaignDuration = 3 * 60 * 60 * 1000; // 3 hours
+                if (Date.now() - broadcastStartTime > maxCampaignDuration) {
+                    console.error(`[TIMEOUT] Broadcast ${broadcast.id} exceeded global timeout! Force restarting worker...`);
+                    broadcastHalted = true;
+                    // Failsafe exit so PM2 resets everything
+                    process.exit(1);
+                }
             }
 
             // ── Credit Check Guard ────────────────────────────
@@ -659,6 +690,8 @@ async function startBroadcastProcessor() {
 
             // ── Session Validation (on first message of batch) ───
             if (broadcast.status === 'PENDING') {
+                const memStart = checkMemoryUsage();
+                console.log(`[LIFECYCLE] Starting broadcast "${broadcast.name}". Initial Memory: ${memStart.usedMB}MB`);
                 console.log(`[SESSION] Validating session before "${broadcast.name}"...`);
                 const sessionOk = await validateSession();
 
@@ -781,12 +814,29 @@ async function startBroadcastProcessor() {
                 });
 
                 if (remaining === 0) {
+                    const memEnd = checkMemoryUsage();
+                    console.log(`[LIFECYCLE] Broadcast "${broadcast.name}" completed. Final Memory: ${memEnd.usedMB}MB`);
+
                     await prisma.broadcast.update({
                         where: { id: broadcast.id },
                         data: { status: 'COMPLETED' },
                     });
-                    console.log(`✅ Broadcast "${broadcast.name}" completed.`);
+
                     batchMessageCount = 0;
+
+                    // 1. Worker Lifecycle Management (onComplete trigger)
+                    // 5. Resource Efficiency
+                    cachedMediaBuffer = null;
+                    cachedImageUrl = null;
+
+                    // We also reset lastActiveTime when finished to start the 5-min idle timer properly
+                    lastActiveTime = Date.now();
+                    lastBroadcastId = null;
+
+                    // Optionally, remove temporary event listeners if any were added outside the global array
+                    // globalSock?.ev.removeAllListeners('messages.upsert'); 
+
+                    console.log(`[LIFECYCLE] Cleanup finished for "${broadcast.name}". Worker is now idle.`);
                 }
                 await wait(2000);
                 continue;
@@ -836,6 +886,7 @@ async function startBroadcastProcessor() {
             // ── Send Message ──────────────────────────────────
             console.log(`📤 Sending to ${jid} [batch #${antiBannedMeta.batchIndex}]${hasMedia ? ' + 🖼️ Media' : ''}...`);
 
+            let messageStatusUpdated = false;
             try {
                 if (!globalSock) {
                     throw new Error('Socket disconnected before send');
@@ -845,12 +896,13 @@ async function startBroadcastProcessor() {
                     const imageUrl = (broadcast as any).imageUrl;
                     let mediaPayload: any = { url: imageUrl };
 
-                    // Optimization: Try to read from local disk to save bandwidth/download time
+                    // Smart Media Update Logic: Re-download if broadcast changes OR imageUrl changes
                     // URL is like /uploads/filename.jpg
-                    if (cachedBroadcastId !== broadcast.id) {
+                    if (cachedBroadcastId !== broadcast.id || cachedImageUrl !== imageUrl) {
                         cachedBroadcastId = broadcast.id;
+                        cachedImageUrl = imageUrl;
                         cachedMediaBuffer = null;
-                        console.log(`[CACHE] New broadcast ${broadcast.id} — clearing media cache.`);
+                        console.log(`[CACHE] New or updated media for broadcast ${broadcast.id} — clearing media cache.`);
                     }
 
                     if (!cachedMediaBuffer) {
@@ -898,12 +950,19 @@ async function startBroadcastProcessor() {
                     // Fallback to URL if cache failed (Baileys might fetch it, or it might be null/invalid if local file missing)
                     // If mediaPayload is still { url: ... }, Baileys handles it.
 
-                    await globalSock.sendMessage(jid, {
+                    // Wrap sending in a Promise.race to prevent hanging
+                    const sendMediaPromise = globalSock.sendMessage(jid, {
                         image: mediaPayload,
                         caption: finalContent
                     });
+                    const timeoutMediaPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('Send Media Timeout (60s)')), 60000));
+
+                    await Promise.race([sendMediaPromise, timeoutMediaPromise]);
                 } else {
-                    await globalSock.sendMessage(jid, { text: finalContent });
+                    const sendTextPromise = globalSock.sendMessage(jid, { text: finalContent });
+                    const timeoutTextPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('Send Text Timeout (30s)')), 30000));
+
+                    await Promise.race([sendTextPromise, timeoutTextPromise]);
                 }
 
                 await prisma.message.update({
@@ -927,6 +986,7 @@ async function startBroadcastProcessor() {
                     data: { credit: { decrement: 1 } },
                 });
 
+                messageStatusUpdated = true;
                 dailySentCount++;
                 console.log(`✅ Sent. [Batch: ${batchMessageCount + 1}/15 | Daily: ${dailySentCount}/${dailyLimit || '∞'}]`);
             } catch (err: any) {
@@ -945,6 +1005,7 @@ async function startBroadcastProcessor() {
                     });
 
                     console.error(`[CRITICAL] 🛑 ${haltReason}`);
+                    messageStatusUpdated = true; // Avoid pushing to failed, let it retry later
                     continue;
                 }
 
@@ -962,6 +1023,28 @@ async function startBroadcastProcessor() {
                     where: { id: broadcast.id },
                     data: { failed: { increment: 1 } },
                 });
+
+                messageStatusUpdated = true;
+            } finally {
+                if (!messageStatusUpdated) {
+                    try {
+                        console.warn(`[FAILSAFE] Message ${messageTask.id} process failed/hung and was not updated. Forcing FAILED status.`);
+                        await prisma.message.update({
+                            where: { id: messageTask.id },
+                            data: {
+                                status: 'FAILED',
+                                error: 'Unhandled Error/Timeout during processing',
+                                antiBannedMeta: antiBannedMeta as any,
+                            },
+                        });
+                        await prisma.broadcast.update({
+                            where: { id: broadcast.id },
+                            data: { failed: { increment: 1 } },
+                        });
+                    } catch (fatalErr) {
+                        console.error('[FATAL] Failed to update message status in finally block:', fatalErr);
+                    }
+                }
             }
 
             // ── Batch Cooling (every 15 messages) ─────────────
