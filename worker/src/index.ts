@@ -439,8 +439,8 @@ async function connectInstance(instanceId: string): Promise<void> {
     }
 
     const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
-    const { version, isLatest } = await fetchLatestBaileysVersion();
-    console.log(`[Connection] Using WA v${version.join('.')} (isLatest: ${isLatest}) for ${instanceId}`);
+    const version: [number, number, number] = [2, 3000, 1015901307];
+    console.log(`[Connection] Using WA v${version.join('.')} for ${instanceId}`);
 
     // ── Browser identity + socket options ──
     // Use Web protocol to avoid heavy mobile history sync chunk timeouts
@@ -450,6 +450,9 @@ async function connectInstance(instanceId: string): Promise<void> {
         logger: pino({ level: 'silent' }) as any, // Prevent verbose disk I/O and memory explosion
         browser: Browsers.macOS('Desktop'),
         syncFullHistory: true,
+        shouldSyncHistoryMessage: () => false,
+        linkPreviewImageThumbnailWidth: 192,
+        generateHighQualityLinkPreview: true,
         waWebSocketUrl: 'wss://web.whatsapp.com/ws/chat',
         connectTimeoutMs: 60_000,
         defaultQueryTimeoutMs: 60_000,
@@ -560,18 +563,27 @@ async function connectInstance(instanceId: string): Promise<void> {
             // 440 = Session replaced on another device, 500+ = server-side rejection.
             const BAD_SESSION_CODES = [401, 408, 440];
             const payloadString = payload ? JSON.stringify(payload).toLowerCase() : '';
+            const hasStreamOrHandshakeError =
+                errorMessage.includes('stream errored') ||
+                errorMessage.includes('handshake failure') ||
+                payloadString.includes('stream error') ||
+                payloadString.includes('handshake failure');
+
             const isBadSession =
                 BAD_SESSION_CODES.includes(statusCode as number) ||
                 (statusCode as number) >= 500 ||
                 errorMessage.includes('bad session') ||
                 errorMessage.includes('connection failure') ||
-                errorMessage.includes('stream errored') ||
                 errorMessage.includes('qr refs over limit') ||
-                payloadString.includes('stream error') ||
-                payloadString.includes('handshake failure');
+                hasStreamOrHandshakeError;
 
+            if (hasStreamOrHandshakeError) {
+                console.log(`[CRITICAL] Handshake rejected. Forcing session reset for ${instanceId}`);
+                deleteSessionFolder(instanceId);
+                shouldReconnect = true;
+            }
             // Logged out → delete session for fresh QR
-            if (statusCode === DisconnectReason.loggedOut) {
+            else if (statusCode === DisconnectReason.loggedOut) {
                 console.log(`[Connection] 🔐 Logged out for ${instanceId}. Clearing session...`);
                 deleteSessionFolder(instanceId);
                 shouldReconnect = true;
