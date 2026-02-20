@@ -22,7 +22,13 @@ const menuItems = [
     { name: "Settings", icon: Settings, href: "/dashboard/settings" },
 ]
 
-export function Sidebar() {
+type UserProfile = {
+    username: string;
+    name: string | null;
+    plan: string;
+};
+
+export function Sidebar({ userProfile }: { userProfile?: UserProfile | null }) {
     const pathname = usePathname()
 
     return (
@@ -62,12 +68,16 @@ export function Sidebar() {
             {/* User Profile / Footer */}
             <div className="p-4 border-t border-slate-800/50">
                 <div className="flex items-center gap-3 px-2 py-2">
-                    <div className="h-8 w-8 rounded-full bg-gradient-to-tr from-slate-700 to-slate-600 flex items-center justify-center text-white font-bold text-xs ring-2 ring-slate-800">
-                        AD
+                    <div className="h-8 w-8 rounded-full bg-gradient-to-tr from-slate-700 to-slate-600 flex items-center justify-center text-white font-bold text-xs ring-2 ring-slate-800 uppercase">
+                        {userProfile?.username ? userProfile.username.substring(0, 2) : "AD"}
                     </div>
                     <div className="flex-1 overflow-hidden">
-                        <p className="text-xs font-semibold text-slate-200 truncate">Admin User</p>
-                        <p className="text-[10px] text-slate-500 truncate">Premium Plan</p>
+                        <p className="text-xs font-semibold text-slate-200 truncate capitalize">
+                            {userProfile?.name || userProfile?.username || "Admin User"}
+                        </p>
+                        <p className="text-[10px] text-slate-500 truncate capitalize">
+                            {userProfile?.plan || "Premium Plan"}
+                        </p>
                     </div>
                     <button
                         onClick={async () => {
