@@ -55,10 +55,13 @@ next-env.d.ts
 # WhatsApp Session (Baileys)
 auth_info_baileys/
 **/auth_info_baileys/
+sessions/
+**/sessions/
 
 # Worker artifacts
 worker/dist/
 worker/auth_info_baileys/
+worker/sessions/
 
 # Lock files (berubah setiap npm install di VPS)
 package-lock.json

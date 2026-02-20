@@ -13,6 +13,26 @@ import * as path from 'path';
 
 const prisma = new PrismaClient();
 const MEMORY_LIMIT_MB = 1024;
+const QR_TIMEOUT_MS = 60_000; // 60 seconds before QR expires and regenerates
+const SESSIONS_DIR = path.join(process.cwd(), 'sessions');
+
+// Ensure sessions directory exists
+if (!fs.existsSync(SESSIONS_DIR)) {
+    fs.mkdirSync(SESSIONS_DIR, { recursive: true });
+}
+
+// ── Socket Pool — one socket per instanceId ────────────────────────
+interface SocketEntry {
+    sock: any;
+    instanceId: string;
+    qrTimeout: ReturnType<typeof setTimeout> | null;
+    qrAttempts: number;
+    presenceInterval: ReturnType<typeof setTimeout> | null;
+}
+
+const socketPool: Map<string, SocketEntry> = new Map();
+
+// ── Resolve identity helpers ────────────────────────────────────────
 
 let cachedPhoneNumber: string | null = null;
 async function getWorkerPhoneNumber(): Promise<string> {
@@ -60,7 +80,7 @@ async function getWorkerInstanceId(): Promise<string> {
     return cachedInstanceId;
 }
 
-// Global Socket Reference
+// Global Socket Reference (points to the active socket for this worker)
 let globalSock: any = null;
 
 // Track idle time and timeouts
@@ -74,9 +94,6 @@ let lastDailyResetDate = new Date().toDateString();
 // Rate-limit / fatal error flag
 let broadcastHalted = false;
 let haltReason = '';
-
-// Presence heartbeat interval reference (for cleanup)
-let presenceHeartbeatInterval: ReturnType<typeof setInterval> | null = null;
 
 // Media Cache (Download once per campaign)
 let cachedBroadcastId: string | null = null;
@@ -94,6 +111,26 @@ const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
  */
 function randomInt(min: number, max: number): number {
     return Math.floor(Math.random() * (max - min + 1)) + min;
+}
+
+/**
+ * Get the session auth path for a given instanceId.
+ * Each instance gets its own isolated folder: ./sessions/auth-{instanceId}
+ */
+function getSessionPath(instanceId: string): string {
+    return path.join(SESSIONS_DIR, `auth-${instanceId}`);
+}
+
+/**
+ * Delete the session auth folder for a given instanceId.
+ * Used when the user logs out or when a fresh QR is needed.
+ */
+function deleteSessionFolder(instanceId: string): void {
+    const sessionPath = getSessionPath(instanceId);
+    if (fs.existsSync(sessionPath)) {
+        fs.rmSync(sessionPath, { recursive: true, force: true });
+        console.log(`[Connection] 🗑️ Session folder deleted for instance: ${instanceId} (${sessionPath})`);
+    }
 }
 
 // ============================================================================
@@ -126,18 +163,6 @@ function processSpintax(text: string): string {
 // 3. INVISIBLE ZERO-WIDTH SUFFIX — 1-5 random zero-width characters
 // ============================================================================
 
-/**
- * Appends 1–5 random zero-width characters at the end of the message.
- * This guarantees unique MD5 hashes per message without changing visual content.
- *
- * Characters used:
- *   U+200B  Zero-Width Space
- *   U+200C  Zero-Width Non-Joiner
- *   U+200D  Zero-Width Joiner
- *   U+FEFF  Zero-Width No-Break Space
- *   U+2060  Word Joiner
- *   U+2062  Invisible Times
- */
 const ZERO_WIDTH_POOL = ['\u200B', '\u200C', '\u200D', '\uFEFF', '\u2060', '\u2062'];
 
 function appendZeroWidthSuffix(text: string): { result: string; suffix: string } {
@@ -161,24 +186,16 @@ function appendZeroWidthSuffix(text: string): { result: string; suffix: string }
 // 4. HUMAN CLOCK — Sleep 11 PM to 5 AM (configurable per-broadcast)
 // ============================================================================
 
-/**
- * Returns true if current hour is within the active sending window.
- * Default Human Clock: 05:00 – 23:00 (sleep during 23:00–05:00)
- */
 function isWithinWorkingHours(startHour: number, endHour: number): boolean {
     const currentHour = new Date().getHours();
 
     if (startHour <= endHour) {
         return currentHour >= startHour && currentHour < endHour;
     } else {
-        // Overnight range (unusual but supported)
         return currentHour >= startHour || currentHour < endHour;
     }
 }
 
-/**
- * Calculates milliseconds until the next working-hours window opens.
- */
 function msUntilWorkingHoursStart(startHour: number): number {
     const now = new Date();
     const target = new Date(now);
@@ -286,24 +303,24 @@ async function validateSession(): Promise<boolean> {
 // 10. PRESENCE HEARTBEAT — Random 'available' pings to simulate active user
 // ============================================================================
 
-/**
- * Starts a background interval that randomly triggers 'available' presence
- * to simulate a real user checking WhatsApp periodically.
- * Fires every 30–90 seconds with a 40% chance of sending the ping.
- */
-function startPresenceHeartbeat(): void {
+function startPresenceHeartbeat(instanceId: string): void {
+    const entry = socketPool.get(instanceId);
+    if (!entry) return;
+
     // Clear any previous interval
-    if (presenceHeartbeatInterval) {
-        clearInterval(presenceHeartbeatInterval);
+    if (entry.presenceInterval) {
+        clearTimeout(entry.presenceInterval);
+        entry.presenceInterval = null;
     }
 
     const tick = async () => {
-        if (!globalSock || broadcastHalted) return;
+        const currentEntry = socketPool.get(instanceId);
+        if (!currentEntry?.sock || broadcastHalted) return;
 
         // 40% chance to send 'available' presence each tick
         if (Math.random() < 0.4) {
             try {
-                await globalSock.sendPresenceUpdate('available');
+                await currentEntry.sock.sendPresenceUpdate('available');
                 console.log('[PRESENCE] 💚 Heartbeat: sent "available" presence');
             } catch {
                 // Non-critical
@@ -313,21 +330,25 @@ function startPresenceHeartbeat(): void {
 
     // Fire every 30–90 seconds (re-randomized each call)
     const scheduleNext = () => {
+        const currentEntry = socketPool.get(instanceId);
+        if (!currentEntry) return;
+
         const intervalMs = randomInt(30_000, 90_000);
-        presenceHeartbeatInterval = setTimeout(async () => {
+        currentEntry.presenceInterval = setTimeout(async () => {
             await tick();
             scheduleNext();
         }, intervalMs);
     };
 
     scheduleNext();
-    console.log('[PRESENCE] Heartbeat scheduler started.');
+    console.log(`[PRESENCE] Heartbeat scheduler started for instance: ${instanceId}`);
 }
 
-function stopPresenceHeartbeat(): void {
-    if (presenceHeartbeatInterval) {
-        clearTimeout(presenceHeartbeatInterval);
-        presenceHeartbeatInterval = null;
+function stopPresenceHeartbeat(instanceId: string): void {
+    const entry = socketPool.get(instanceId);
+    if (entry?.presenceInterval) {
+        clearTimeout(entry.presenceInterval);
+        entry.presenceInterval = null;
     }
 }
 
@@ -336,34 +357,63 @@ function stopPresenceHeartbeat(): void {
 // ============================================================================
 
 /**
- * Gracefully disconnects the socket, clears all event listeners,
- * and closes the Prisma connection pool.
- * Called by SIGINT/SIGTERM handlers and during reconnection.
+ * Cleans up a specific socket from the pool by instanceId.
+ * Removes event listeners, closes the WS connection, and clears timers.
  */
-async function cleanupSocket(reason: string): Promise<void> {
-    console.log(`[CLEANUP] Socket cleanup initiated: ${reason}`);
+async function cleanupSocketForInstance(instanceId: string, reason: string): Promise<void> {
+    console.log(`[CLEANUP] Socket cleanup for instance ${instanceId}: ${reason}`);
 
-    stopPresenceHeartbeat();
+    const entry = socketPool.get(instanceId);
+    if (!entry) {
+        console.log(`[CLEANUP] No socket found in pool for instance ${instanceId}`);
+        return;
+    }
 
-    if (globalSock) {
-        try {
-            // Remove all event listeners to prevent memory leaks
-            globalSock.ev.removeAllListeners('creds.update');
-            globalSock.ev.removeAllListeners('connection.update');
+    // Clear QR timeout
+    if (entry.qrTimeout) {
+        clearTimeout(entry.qrTimeout);
+        entry.qrTimeout = null;
+    }
 
-            // Close the WebSocket connection
-            globalSock.end(undefined);
-        } catch (err) {
-            console.error('[CLEANUP] Error during socket teardown:', err);
-        }
+    // Stop presence heartbeat
+    stopPresenceHeartbeat(instanceId);
+
+    try {
+        // Remove all event listeners to prevent memory leaks
+        entry.sock.ev.removeAllListeners('creds.update');
+        entry.sock.ev.removeAllListeners('connection.update');
+
+        // Close the WebSocket connection
+        entry.sock.end(undefined);
+    } catch (err) {
+        console.error(`[CLEANUP] Error during socket teardown for ${instanceId}:`, err);
+    }
+
+    // Remove from pool
+    socketPool.delete(instanceId);
+
+    // If this was the global socket, clear the reference
+    if (globalSock === entry.sock) {
         globalSock = null;
     }
+}
+
+/**
+ * Legacy cleanup — cleans ALL sockets (used for graceful shutdown)
+ */
+async function cleanupAllSockets(reason: string): Promise<void> {
+    console.log(`[CLEANUP] Cleaning up ALL sockets: ${reason}`);
+    const instanceIds = [...socketPool.keys()];
+    for (const id of instanceIds) {
+        await cleanupSocketForInstance(id, reason);
+    }
+    globalSock = null;
 }
 
 async function gracefulShutdown(signal: string): Promise<void> {
     console.log(`\n[SHUTDOWN] Received ${signal}. Shutting down gracefully...`);
 
-    await cleanupSocket(signal);
+    await cleanupAllSockets(signal);
 
     try {
         const instanceId = await getWorkerInstanceId();
@@ -386,143 +436,222 @@ process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('uncaughtException', async (err) => {
     console.error('[FATAL] Uncaught exception:', err);
-    await cleanupSocket('uncaughtException');
+    await cleanupAllSockets('uncaughtException');
     process.exit(1);
 });
 
 // ============================================================================
-// 12. WHATSAPP CONNECTION (with enhanced reconnection & cleanup)
+// 12. WHATSAPP CONNECTION (with dynamic paths, QR timeout & socket pool)
 // ============================================================================
 
 async function connectToWhatsApp() {
-    // Clean up any previous socket before creating a new one
-    await cleanupSocket('reconnection');
+    const instanceId = await getWorkerInstanceId();
 
-    const phoneNumber = await getWorkerPhoneNumber();
-    const { state, saveCreds } = await useMultiFileAuthState('sessions/' + phoneNumber);
+    console.log(`[Connection] ═══════════════════════════════════════════`);
+    console.log(`[Connection] Initializing session for Instance: ${instanceId}`);
+    console.log(`[Connection] ═══════════════════════════════════════════`);
+
+    // ── Check if a socket for this instance already exists in the pool ──
+    const existingEntry = socketPool.get(instanceId);
+    if (existingEntry) {
+        console.log(`[Connection] Socket already exists for instance ${instanceId}. Cleaning up before reconnect...`);
+        await cleanupSocketForInstance(instanceId, 'reconnection');
+    }
+
+    // ── Dynamic session path: ./sessions/auth-{instanceId} ──
+    const sessionPath = getSessionPath(instanceId);
+    console.log(`[Connection] Session path: ${sessionPath}`);
+
+    const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
 
     const sock = makeWASocket({
         auth: state,
-
         logger: pino({ level: 'silent' }) as any,
         browser: Browsers.macOS('Desktop'),
         syncFullHistory: false,
     });
 
-    // NOTE: globalSock is only set when connection is 'open' (see below)
+    // ── Register in socket pool ──
+    const poolEntry: SocketEntry = {
+        sock,
+        instanceId,
+        qrTimeout: null,
+        qrAttempts: 0,
+        presenceInterval: null,
+    };
+    socketPool.set(instanceId, poolEntry);
 
+    console.log(`[Connection] Socket created and added to pool. Pool size: ${socketPool.size}`);
+
+    // ── Creds persistence ──
     sock.ev.on('creds.update', saveCreds);
 
+    // ── Connection lifecycle handler ──
     sock.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect, qr } = update;
 
+        // ── Detailed state logging ──
+        console.log(`[Connection] Current State: ${update.connection || 'unchanged'} | Instance: ${instanceId}`);
+        if (update.receivedPendingNotifications !== undefined) {
+            console.log(`[Connection] Pending notifications received: ${update.receivedPendingNotifications}`);
+        }
+
+        // ── QR Code Received ──
         if (qr) {
-            console.log('QR Code generated');
-            try {
-                const instanceId = await getWorkerInstanceId();
-                await prisma.instance.update({
-                    where: { id: instanceId },
-                    data: { status: 'QR_READY', qrCode: qr },
-                });
-            } catch (error) {
-                console.error('Failed to save QR code to DB:', error);
+            const entry = socketPool.get(instanceId);
+            if (entry) {
+                entry.qrAttempts++;
+                console.log(`[Connection] QR Received for Instance: ${instanceId} (attempt #${entry.qrAttempts})`);
+
+                // ── Clear any previous QR timeout ──
+                if (entry.qrTimeout) {
+                    clearTimeout(entry.qrTimeout);
+                    entry.qrTimeout = null;
+                }
+
+                // ── Save QR to database immediately ──
+                try {
+                    await prisma.instance.update({
+                        where: { id: instanceId },
+                        data: { status: 'QR_READY', qrCode: qr },
+                    });
+                    console.log(`[Connection] ✅ QR saved to DB for Instance: ${instanceId}`);
+                } catch (error) {
+                    console.error(`[Connection] ❌ Failed to save QR code to DB for ${instanceId}:`, error);
+                }
+
+                // ── QR Timeout Logic (60 seconds) ──
+                // If QR is not scanned within 60s, the socket is ready for a new one.
+                // After 5 failed attempts, close and let the user request a new connection.
+                entry.qrTimeout = setTimeout(async () => {
+                    const currentEntry = socketPool.get(instanceId);
+                    if (!currentEntry) return;
+
+                    console.log(`[Connection] ⏰ QR timeout (${QR_TIMEOUT_MS / 1000}s) for Instance: ${instanceId}. Attempt #${currentEntry.qrAttempts}`);
+
+                    if (currentEntry.qrAttempts >= 5) {
+                        console.log(`[Connection] ⚠️ QR not scanned after ${currentEntry.qrAttempts} attempts. Closing socket for Instance: ${instanceId}. Will auto-retry in 30s.`);
+
+                        await cleanupSocketForInstance(instanceId, 'qr_timeout_max_attempts');
+
+                        try {
+                            await prisma.instance.update({
+                                where: { id: instanceId },
+                                data: { status: 'DISCONNECTED', qrCode: '' },
+                            });
+                        } catch { /* ignore */ }
+
+                        // Auto-retry after a delay — will generate a fresh QR
+                        await wait(30_000);
+                        console.log(`[Connection] 🔄 Auto-retrying connection for Instance: ${instanceId} after QR timeout...`);
+                        await connectToWhatsApp();
+                    }
+                    // If < 5 attempts, Baileys will automatically generate a new QR 
+                    // which will fire another connection.update with a new qr value.
+                }, QR_TIMEOUT_MS);
             }
         }
 
+        // ── Connection Closed ──
         if (connection === 'close') {
             const statusCode = (lastDisconnect?.error as Boom)?.output?.statusCode;
             let shouldReconnect = statusCode !== DisconnectReason.loggedOut;
 
-            // Start a new session if logged out
+            console.log(`[Connection] ❌ Connection closed for Instance: ${instanceId} (code: ${statusCode})`);
+
+            // ── Logged out → delete session folder for fresh QR ──
             if (statusCode === DisconnectReason.loggedOut) {
-                console.log('Session logged out (Code 401). Clearing auth to generate new QR...');
-                const fs = await import('fs');
-                const path = await import('path');
-                const phoneNumber = await getWorkerPhoneNumber();
-                const authDir = path.join(process.cwd(), 'sessions', phoneNumber);
-                if (fs.existsSync(authDir)) {
-                    fs.rmSync(authDir, { recursive: true, force: true });
-                }
+                console.log(`[Connection] 🔐 Session logged out (Code 401) for Instance: ${instanceId}. Clearing auth for fresh QR...`);
+                deleteSessionFolder(instanceId);
                 shouldReconnect = true;
             }
 
-            console.log(`Connection closed (code: ${statusCode}), reconnecting: ${shouldReconnect}`);
+            // ── Cleanup the dead socket ──
+            await cleanupSocketForInstance(instanceId, `connection_close_${statusCode}`);
 
-            // Cleanup the dead socket properly
-            await cleanupSocket(`connection_close_${statusCode}`);
-
+            // ── Update DB status ──
             try {
-                const instanceId = await getWorkerInstanceId();
                 await prisma.instance.update({
                     where: { id: instanceId },
                     data: { status: 'DISCONNECTED', qrCode: '' },
                 });
+                console.log(`[Connection] DB updated to DISCONNECTED for Instance: ${instanceId}`);
             } catch (error) {
-                console.error('Failed to update instance status (DISCONNECTED):', error);
+                console.error(`[Connection] Failed to update instance status (DISCONNECTED) for ${instanceId}:`, error);
             }
 
-            // Detect rate-limit disconnect → halt all broadcasts
+            // ── Detect rate-limit disconnect → halt all broadcasts ──
             if (isRateLimitError(lastDisconnect?.error)) {
                 broadcastHalted = true;
                 haltReason = `Connection closed by WhatsApp (code: ${statusCode}). Possible rate-limit or ban action.`;
                 console.error(`[CRITICAL] ${haltReason}`);
 
-                const instanceId = await getWorkerInstanceId();
                 await prisma.broadcast.updateMany({
                     where: { status: 'RUNNING', instanceId },
                     data: { status: 'PAUSED_RATE_LIMIT' },
                 });
             }
 
+            // ── Reconnect with random delay ──
             if (shouldReconnect) {
                 const reconnectDelay = randomInt(3000, 10000);
-                console.log(`Reconnecting in ${reconnectDelay / 1000}s...`);
+                console.log(`[Connection] 🔄 Reconnecting Instance: ${instanceId} in ${reconnectDelay / 1000}s...`);
                 await wait(reconnectDelay);
                 await connectToWhatsApp();
             }
-        } else if (connection === 'open') {
-            console.log('Connection opened successfully.');
+        }
+
+        // ── Connection Opened Successfully ──
+        if (connection === 'open') {
+            console.log(`[Connection] ✅ Connection opened for Instance: ${instanceId}`);
+
+            // Clear any QR timeout since we're connected
+            const entry = socketPool.get(instanceId);
+            if (entry?.qrTimeout) {
+                clearTimeout(entry.qrTimeout);
+                entry.qrTimeout = null;
+                entry.qrAttempts = 0;
+            }
+
+            // Set as the global active socket
             globalSock = sock;
             broadcastHalted = false;
             haltReason = '';
 
             // Start the presence heartbeat for active user simulation
-            startPresenceHeartbeat();
+            startPresenceHeartbeat(instanceId);
 
-            // Update instance status in DB — critical for frontend to show "CONNECTED"
+            // Update instance status in DB
             try {
-                const instanceId = await getWorkerInstanceId();
                 await prisma.instance.update({
                     where: { id: instanceId },
                     data: { status: 'CONNECTED', qrCode: '' },
                 });
-                console.log('[DB] ✅ Instance status updated to CONNECTED.');
+                console.log(`[Connection] ✅ Instance ${instanceId} status updated to CONNECTED.`);
             } catch (err) {
-                console.error('[DB] ❌ Upsert failed, trying fallback update:', err);
+                console.error(`[Connection] ❌ Failed to update CONNECTED status for ${instanceId}:`, err);
                 try {
-                    const instanceId = await getWorkerInstanceId();
                     await prisma.instance.updateMany({
                         where: { id: instanceId },
                         data: { status: 'CONNECTED', qrCode: '' },
                     });
-                    console.log('[DB] ✅ Fallback update succeeded.');
+                    console.log(`[Connection] ✅ Fallback update succeeded for ${instanceId}.`);
                 } catch (err2) {
-                    console.error('[DB] ❌ Fallback update also failed:', err2);
+                    console.error(`[Connection] ❌ Fallback update also failed for ${instanceId}:`, err2);
                 }
             }
 
             // Resume any broadcasts that were paused due to disconnection
             try {
-                const instanceId = await getWorkerInstanceId();
                 const resumed = await prisma.broadcast.updateMany({
                     where: { status: { in: ['PAUSED_RATE_LIMIT', 'PAUSED_WORKING_HOURS'] }, instanceId },
                     data: { status: 'RUNNING' },
                 });
                 if (resumed.count > 0) {
-                    console.log(`[RECONNECT] ♻️ Resumed ${resumed.count} paused broadcast(s).`);
+                    console.log(`[Connection] ♻️ Resumed ${resumed.count} paused broadcast(s) for Instance: ${instanceId}.`);
                 }
             } catch (err) {
-                console.error('[DB] Failed to resume paused broadcasts:', err);
+                console.error(`[Connection] Failed to resume paused broadcasts for ${instanceId}:`, err);
             }
         }
     });
@@ -534,21 +663,13 @@ async function connectToWhatsApp() {
 // 13. COMPOSING PRESENCE — 3–7 seconds typing before each message
 // ============================================================================
 
-/**
- * Triggers 'composing' presence for 3–7 seconds before each message.
- * Recipients will see "Typing..." indicator before the message arrives.
- * Returns the actual typing duration used (for anti_banned_meta logging).
- */
 async function simulateTyping(jid: string, broadcastId: string, minMs: number = 3000, maxMs: number = 7000): Promise<number> {
     if (!globalSock) return 0;
 
     const typingDuration = randomInt(minMs, maxMs);
 
     try {
-        // Subscribe to presence first (required for composing to show)
         await globalSock.presenceSubscribe(jid);
-
-        // Set 'composing' status — this triggers "Typing..." on recipient's phone
         await globalSock.sendPresenceUpdate('composing', jid);
 
         await logAntiBanAction(
@@ -558,8 +679,6 @@ async function simulateTyping(jid: string, broadcastId: string, minMs: number = 
         );
 
         await wait(typingDuration);
-
-        // Clear composing status
         await globalSock.sendPresenceUpdate('paused', jid);
     } catch (err) {
         console.warn('[TYPING] Presence update failed (non-fatal):', err);
@@ -591,7 +710,6 @@ async function applyBatchCoolingIfNeeded(broadcastId: string): Promise<void> {
 
         console.log(`[BATCH COOL] 🧊 Mandatory rest: ${cooldownSec}s after ${batchMessageCount} messages...`);
 
-        // Set presence to 'unavailable' during cooldown to mimic user away
         if (globalSock) {
             try {
                 await globalSock.sendPresenceUpdate('unavailable');
@@ -600,14 +718,12 @@ async function applyBatchCoolingIfNeeded(broadcastId: string): Promise<void> {
 
         await wait(cooldownMs);
 
-        // Come back online
         if (globalSock) {
             try {
                 await globalSock.sendPresenceUpdate('available');
             } catch { /* non-critical */ }
         }
 
-        // Reset batch counter
         batchMessageCount = 0;
         console.log(`[BATCH COOL] ✅ Cooling complete. Resuming...`);
     }
@@ -619,7 +735,10 @@ async function applyBatchCoolingIfNeeded(broadcastId: string): Promise<void> {
 
 async function startBroadcastProcessor() {
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    console.log('🚀 Anti-Ban Broadcast Processor v3.0');
+    console.log('🚀 Anti-Ban Broadcast Processor v4.0');
+    console.log('   ├─ Dynamic Session Paths (auth-${instanceId}) ✓');
+    console.log('   ├─ Socket Pool with Instance Isolation ✓');
+    console.log('   ├─ QR Timeout (60s auto-regenerate) ✓');
     console.log('   ├─ Nested Spintax Engine ✓');
     console.log('   ├─ Composing Presence (3–7s) ✓');
     console.log('   ├─ Available Presence Heartbeat ✓');
@@ -644,6 +763,14 @@ async function startBroadcastProcessor() {
                     global.gc();
                     console.log('[MEMORY] Manual GC triggered.');
                 }
+
+                // Close idle sockets to free memory
+                for (const [id, entry] of socketPool.entries()) {
+                    if (entry.sock !== globalSock) {
+                        console.log(`[MEMORY] Closing idle socket for instance ${id} to free memory.`);
+                        await cleanupSocketForInstance(id, 'memory_pressure');
+                    }
+                }
             }
 
             // ── Halt Check ────────────────────────────────────
@@ -665,7 +792,7 @@ async function startBroadcastProcessor() {
                 where: { status: { in: ['PENDING', 'RUNNING'] }, instanceId },
                 orderBy: { updatedAt: 'asc' },
                 include: {
-                    user: true, // Fetch user to check credits
+                    user: true,
                     messages: {
                         where: { status: 'PENDING' },
                         take: 1,
@@ -674,12 +801,11 @@ async function startBroadcastProcessor() {
             });
 
             // ── Idle Auto-Refresh (5 minutes) ─────────────────
-            // If no active broadcast is found, check how long we've been idle.
             if (!broadcast) {
                 const idleTime = Date.now() - lastActiveTime;
                 if (idleTime > 5 * 60 * 1000) {
                     console.log(`[AUTO-REFRESH] Worker idle for 5+ minutes. Restarting process to free memory...`);
-                    await cleanupSocket('idle_refresh');
+                    await cleanupAllSockets('idle_refresh');
                     process.exit(0); // PM2 will automatically restart this
                 }
                 await wait(5000);
@@ -694,13 +820,10 @@ async function startBroadcastProcessor() {
                 lastBroadcastId = broadcast.id;
                 broadcastStartTime = Date.now();
             } else {
-                // If the same broadcast is running, check if it's taking an unreasonable amount of time
-                // E.g., over 3 hours for one campaign without finishing
                 const maxCampaignDuration = 3 * 60 * 60 * 1000; // 3 hours
                 if (Date.now() - broadcastStartTime > maxCampaignDuration) {
                     console.error(`[TIMEOUT] Broadcast ${broadcast.id} exceeded global timeout! Force restarting worker...`);
                     broadcastHalted = true;
-                    // Failsafe exit so PM2 resets everything
                     process.exit(1);
                 }
             }
@@ -717,7 +840,7 @@ async function startBroadcastProcessor() {
 
                 await prisma.broadcast.update({
                     where: { id: broadcast.id },
-                    data: { status: 'PAUSED_NO_CREDIT' } // Ensure this status is handled or just use FAILED/PAUSED
+                    data: { status: 'PAUSED_NO_CREDIT' }
                 });
 
                 continue;
@@ -747,7 +870,6 @@ async function startBroadcastProcessor() {
                     data: { status: 'RUNNING' },
                 });
 
-                // Reset batch counter for new broadcast
                 batchMessageCount = 0;
             }
 
@@ -772,21 +894,18 @@ async function startBroadcastProcessor() {
                     data: { status: 'PAUSED_WORKING_HOURS' },
                 });
 
-                // Set presence to unavailable during sleep
                 if (globalSock) {
                     try {
                         await globalSock.sendPresenceUpdate('unavailable');
                     } catch { /* non-critical */ }
                 }
 
-                // Sleep in 60-second chunks
                 const chunks = Math.ceil(sleepMs / 60000);
                 for (let i = 0; i < chunks; i++) {
                     await wait(Math.min(60000, sleepMs - i * 60000));
                     if (broadcastHalted) break;
                 }
 
-                // Wake up
                 if (globalSock) {
                     try {
                         await globalSock.sendPresenceUpdate('available');
@@ -858,18 +977,10 @@ async function startBroadcastProcessor() {
                     });
 
                     batchMessageCount = 0;
-
-                    // 1. Worker Lifecycle Management (onComplete trigger)
-                    // 5. Resource Efficiency
                     cachedMediaBuffer = null;
                     cachedImageUrl = null;
-
-                    // We also reset lastActiveTime when finished to start the 5-min idle timer properly
                     lastActiveTime = Date.now();
                     lastBroadcastId = null;
-
-                    // Optionally, remove temporary event listeners if any were added outside the global array
-                    // globalSock?.ev.removeAllListeners('messages.upsert'); 
 
                     console.log(`[LIFECYCLE] Cleanup finished for "${broadcast.name}". Worker is now idle.`);
                 }
@@ -892,7 +1003,6 @@ async function startBroadcastProcessor() {
             const { result: finalContent, suffix: zwSuffix } = appendZeroWidthSuffix(spintaxResult);
             await logAntiBanAction(broadcast.id, 'UNIQUE_SUFFIX', zwSuffix);
 
-            // ── Simulate Typing (3–7 seconds) ─────────────────
             // ── Simulate Typing (3–7s normally, +2-4s for media) ──
             const hasMedia = !!(broadcast as any).imageUrl;
             const typingMin = hasMedia ? 5000 : 3000;
@@ -931,8 +1041,6 @@ async function startBroadcastProcessor() {
                     const imageUrl = (broadcast as any).imageUrl;
                     let mediaPayload: any = { url: imageUrl };
 
-                    // Smart Media Update Logic: Re-download if broadcast changes OR imageUrl changes
-                    // URL is like /uploads/filename.jpg
                     if (cachedBroadcastId !== broadcast.id || cachedImageUrl !== imageUrl) {
                         cachedBroadcastId = broadcast.id;
                         cachedImageUrl = imageUrl;
@@ -941,17 +1049,11 @@ async function startBroadcastProcessor() {
                     }
 
                     if (!cachedMediaBuffer) {
-                        // Optimization: Try to read from local disk to save bandwidth/download time
-                        // URL is like /uploads/filename.jpg
                         if (imageUrl.startsWith('/')) {
-                            // Try resolving in current dir (e.g. running from root)
                             let localPath = path.join(process.cwd(), 'public', imageUrl);
-
-                            // If not found, try parent dir (e.g. running from /worker)
                             if (!fs.existsSync(localPath)) {
                                 localPath = path.join(process.cwd(), '../public', imageUrl);
                             }
-
                             if (fs.existsSync(localPath)) {
                                 cachedMediaBuffer = fs.readFileSync(localPath);
                                 console.log('[MEDIA] Loaded into memory from local file:', localPath);
@@ -959,7 +1061,6 @@ async function startBroadcastProcessor() {
                                 console.warn('[MEDIA] Local file not found:', imageUrl);
                             }
                         } else if (imageUrl.startsWith('http')) {
-                            // Remote URL (Supabase or other) — download once
                             try {
                                 console.log('[MEDIA] Downloading from remote URL:', imageUrl);
                                 const res = await fetch(imageUrl);
@@ -974,18 +1075,12 @@ async function startBroadcastProcessor() {
                                 console.error('[MEDIA] Error downloading media:', err);
                             }
                         }
-                    } else {
-                        // console.log('[MEDIA] Using cached buffer');
                     }
 
                     if (cachedMediaBuffer) {
                         mediaPayload = cachedMediaBuffer;
                     }
 
-                    // Fallback to URL if cache failed (Baileys might fetch it, or it might be null/invalid if local file missing)
-                    // If mediaPayload is still { url: ... }, Baileys handles it.
-
-                    // Wrap sending in a Promise.race to prevent hanging
                     const sendMediaPromise = globalSock.sendMessage(jid, {
                         image: mediaPayload,
                         caption: finalContent
@@ -1027,7 +1122,6 @@ async function startBroadcastProcessor() {
             } catch (err: any) {
                 console.error(`❌ Failed to send to ${jid}:`, err?.message || err);
 
-                // ── Rate-Limit Detection on Send Error ────────
                 if (isRateLimitError(err)) {
                     broadcastHalted = true;
                     haltReason = `Rate-limit on send: ${err?.message || 'Unknown'}`;
@@ -1040,11 +1134,10 @@ async function startBroadcastProcessor() {
                     });
 
                     console.error(`[CRITICAL] 🛑 ${haltReason}`);
-                    messageStatusUpdated = true; // Avoid pushing to failed, let it retry later
+                    messageStatusUpdated = true;
                     continue;
                 }
 
-                // Normal failure
                 await prisma.message.update({
                     where: { id: messageTask.id },
                     data: {
@@ -1120,49 +1213,35 @@ function startDisconnectWatcher(): void {
             });
 
             if (instance?.status === 'DISCONNECTING') {
-                console.log('[DISCONNECT] Dashboard requested disconnect. Logging out...');
+                console.log(`[DISCONNECT] Dashboard requested disconnect for Instance: ${instanceId}. Logging out...`);
                 clearInterval(disconnectWatcherInterval!);
                 disconnectWatcherInterval = null;
 
-                // Stop all ongoing work
-                stopPresenceHeartbeat();
-
-                if (globalSock) {
+                const entry = socketPool.get(instanceId);
+                if (entry?.sock) {
                     try {
-                        // logout() sends a proper logout to WhatsApp servers
-                        // This will trigger connection.update with loggedOut code
-                        // so the reconnect logic won't fire (shouldReconnect = false)
-                        await globalSock.logout();
-                        console.log('[DISCONNECT] Logout sent to WhatsApp successfully.');
+                        await entry.sock.logout();
+                        console.log(`[DISCONNECT] Logout sent to WhatsApp for Instance: ${instanceId}.`);
                     } catch (err) {
-                        console.error('[DISCONNECT] Error during logout, forcing cleanup:', err);
-                        // Force cleanup even if logout fails
-                        await cleanupSocket('forced_disconnect');
+                        console.error(`[DISCONNECT] Error during logout for ${instanceId}, forcing cleanup:`, err);
+                        await cleanupSocketForInstance(instanceId, 'forced_disconnect');
                     }
                 }
 
                 // Clear the auth state so a fresh QR is generated on reconnect
-                const fs = await import('fs');
-                const path = await import('path');
-                const phoneNumber = await getWorkerPhoneNumber();
-                const authDir = path.join(process.cwd(), 'sessions', phoneNumber);
-                if (fs.existsSync(authDir)) {
-                    fs.rmSync(authDir, { recursive: true, force: true });
-                    console.log('[DISCONNECT] Auth state cleared.');
-                }
+                deleteSessionFolder(instanceId);
 
-                // clear media cache
+                // Clear media cache
                 cachedMediaBuffer = null;
                 cachedImageUrl = null;
 
                 // Update DB status
-                const instanceId = await getWorkerInstanceId();
                 await prisma.instance.update({
                     where: { id: instanceId },
                     data: { status: 'DISCONNECTED', qrCode: '' },
                 });
 
-                console.log('[DISCONNECT] Disconnected successfully. Restarting for new QR...');
+                console.log(`[DISCONNECT] ✅ Instance ${instanceId} disconnected successfully. Restarting for new QR...`);
 
                 // Wait a moment then reconnect to show a fresh QR
                 await wait(3000);
@@ -1215,7 +1294,7 @@ async function startVerificationWorker() {
                 } catch (err: any) {
                     console.error(`[VERIFICATION] Check failed for ${contact.phone}`, err.message);
                     await wait(2000);
-                    continue; // Leave as PENDING to retry later, skip updating
+                    continue;
                 }
 
                 await prisma.contact.update({
@@ -1223,7 +1302,6 @@ async function startVerificationWorker() {
                     data: { status: isRegistered ? 'VERIFIED' : 'INVALID' },
                 });
 
-                // Small delay between checks to avoid rate limits
                 await wait(200 + randomInt(100, 300));
             }
 
@@ -1235,20 +1313,65 @@ async function startVerificationWorker() {
 }
 
 // ============================================================================
-// 17. MAIN EXECUTION
+// 17. STARTUP CLEANUP — Remove stale session artifacts
+// ============================================================================
+
+/**
+ * Removes legacy auth folders that don't follow the new naming convention.
+ * e.g., 'auth_info_baileys' or old phone-number-based session folders.
+ */
+function cleanupLegacySessions(): void {
+    // Check for legacy auth_info_baileys folder in worker root
+    const legacyPaths = [
+        path.join(process.cwd(), 'auth_info_baileys'),
+        path.join(process.cwd(), 'auth_info'),
+    ];
+
+    for (const legacyPath of legacyPaths) {
+        if (fs.existsSync(legacyPath)) {
+            console.log(`[STARTUP] 🧹 Removing legacy session folder: ${legacyPath}`);
+            fs.rmSync(legacyPath, { recursive: true, force: true });
+        }
+    }
+
+    // Also check for any session folders in ./sessions that are NOT in auth-{id} format
+    // (e.g., phone-number-based folders from the old implementation)
+    if (fs.existsSync(SESSIONS_DIR)) {
+        const entries = fs.readdirSync(SESSIONS_DIR);
+        for (const entry of entries) {
+            if (!entry.startsWith('auth-')) {
+                const fullPath = path.join(SESSIONS_DIR, entry);
+                console.log(`[STARTUP] 🧹 Removing non-standard session folder: ${fullPath}`);
+                try {
+                    fs.rmSync(fullPath, { recursive: true, force: true });
+                } catch (e) {
+                    console.warn(`[STARTUP] Could not remove ${fullPath}:`, e);
+                }
+            }
+        }
+    }
+}
+
+// ============================================================================
+// 18. MAIN EXECUTION
 // ============================================================================
 
 (async () => {
     try {
         console.log('═══════════════════════════════════════════════════');
-        console.log('  uWA Worker — Anti-Ban Enhanced Engine v3.0');
+        console.log('  uWA Worker — Anti-Ban Enhanced Engine v4.0');
         console.log(`  Memory Limit: ${MEMORY_LIMIT_MB}MB`);
+        console.log(`  QR Timeout: ${QR_TIMEOUT_MS / 1000}s`);
+        console.log(`  Session Dir: ${SESSIONS_DIR}`);
         console.log(`  Human Clock: Active 05:00–23:00`);
         console.log(`  Batch Cool: Every 15 msgs → 120–300s rest`);
         console.log(`  Typing: 3–7s composing before each send`);
         console.log(`  Zero-Width: 1–5 invisible chars per message`);
         console.log(`  Time: ${new Date().toISOString()}`);
         console.log('═══════════════════════════════════════════════════');
+
+        // Clean up any legacy session folders from old implementations
+        cleanupLegacySessions();
 
         await connectToWhatsApp();
         startBroadcastProcessor();
