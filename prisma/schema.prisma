@@ -14,13 +14,14 @@ datasource db {
 }
 
 model Instance {
-  id        String   @id @default(cuid())
-  name      String   @unique
-  status    String   @default("DISCONNECTED")
-  qrCode    String?
-  userId    String
-  user      User     @relation(fields: [userId], references: [id])
-  updatedAt DateTime @updatedAt
+  id          String      @id @default(cuid())
+  phoneNumber String      @unique
+  name        String?
+  status      String      @default("DISCONNECTED")
+  qrCode      String?
+  users       User[]
+  broadcasts  Broadcast[]
+  updatedAt   DateTime    @updatedAt
 }
 
 model Broadcast {
@@ -38,8 +39,11 @@ model Broadcast {
   dailyLimit        Int       @default(0)      // 0 = no limit
   workingHourStart  Int       @default(5)      // 05:00 (Human Clock: awake)
   workingHourEnd    Int       @default(23)     // 23:00 (Human Clock: sleep 23–05)
+  isTurboMode       Boolean   @default(false)
   userId            String
   user              User      @relation(fields: [userId], references: [id])
+  instanceId        String
+  instance          Instance  @relation(fields: [instanceId], references: [id])
   imageUrl          String?   // Optional image for the broadcast
   messages          Message[]
   logs              BroadcastLog[]
@@ -100,4 +104,16 @@ model User {
   instances     Instance[]
   broadcasts    Broadcast[]
   templates     Template[]
+  settings      Settings?
+}
+
+model Settings {
+  id               String   @id @default(cuid())
+  userId           String   @unique
+  user             User     @relation(fields: [userId], references: [id])
+  isTurboMode      Boolean  @default(false)
+  workingHourStart Int      @default(5)
+  workingHourEnd   Int      @default(23)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
 }

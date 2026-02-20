@@ -47,6 +47,9 @@ export default function BroadcastPage() {
     const [contacts, setContacts] = useState<string[]>([])
     const [delayMin, setDelayMin] = useState(20)
     const [delayMax, setDelayMax] = useState(60)
+    const [isTurboMode, setIsTurboMode] = useState(false)
+    const [workingHourStart, setWorkingHourStart] = useState(5)
+    const [workingHourEnd, setWorkingHourEnd] = useState(23)
     const [imageFile, setImageFile] = useState<File | null>(null)
     const [imagePreview, setImagePreview] = useState<string | null>(null)
     const [uploadedImageUrl, setUploadedImageUrl] = useState<string | null>(null)
@@ -279,7 +282,10 @@ export default function BroadcastPage() {
                     imageUrl: uploadedImageUrl,
                     recipients: contacts,
                     delayMin: Number(delayMin),
-                    delayMax: Number(delayMax)
+                    delayMax: Number(delayMax),
+                    isTurboMode,
+                    workingHourStart: Number(workingHourStart),
+                    workingHourEnd: Number(workingHourEnd)
                 })
             })
 
@@ -546,41 +552,82 @@ export default function BroadcastPage() {
                             </CardTitle>
                         </CardHeader>
                         <CardContent className="p-6 space-y-6">
-                            <div className="grid grid-cols-2 gap-6">
-                                <div className="space-y-3">
-                                    <Label className="text-xs font-semibold text-slate-500 uppercase tracking-wider flex items-center gap-2">
-                                        Interval Pengiriman
-                                        <ShieldAlert className="h-3 w-3 text-emerald-600" />
-                                    </Label>
-                                    <div className="flex items-center gap-2">
-                                        <div className="relative flex-1">
-                                            <Input
-                                                type="number"
-                                                value={delayMin}
-                                                onChange={(e) => setDelayMin(Number(e.target.value))}
-                                                className="pl-3 pr-8 h-10 font-mono text-sm"
-                                            />
-                                            <span className="absolute right-3 top-2.5 text-xs text-slate-400">s</span>
+                            <div className="space-y-6">
+                                <div className="p-5 bg-slate-50 border border-slate-200 rounded-xl space-y-4">
+                                    <div className="flex items-center justify-between">
+                                        <div>
+                                            <Label className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                                                Turbo Mode
+                                                <Zap className="h-4 w-4 text-slate-500" />
+                                            </Label>
+                                            <p className="text-xs text-slate-500 mt-1">Nonaktifkan jeda istirahat malam untuk pengiriman 24/7.</p>
                                         </div>
-                                        <span className="text-slate-400 font-medium">–</span>
-                                        <div className="relative flex-1">
-                                            <Input
-                                                type="number"
-                                                value={delayMax}
-                                                onChange={(e) => setDelayMax(Number(e.target.value))}
-                                                className="pl-3 pr-8 h-10 font-mono text-sm"
-                                            />
-                                            <span className="absolute right-3 top-2.5 text-xs text-slate-400">s</span>
-                                        </div>
+                                        <button
+                                            type="button"
+                                            onClick={() => setIsTurboMode(!isTurboMode)}
+                                            className={`relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-slate-900 focus:ring-offset-2 ${isTurboMode ? 'bg-slate-900' : 'bg-slate-300'}`}
+                                        >
+                                            <span aria-hidden="true" className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${isTurboMode ? 'translate-x-5' : 'translate-x-0'}`} />
+                                        </button>
                                     </div>
-                                    <p className="text-[10px] text-slate-400">Sistem akan mengacak jeda antara {delayMin}-{delayMax} detik untuk menghindari blokir.</p>
+
+                                    {isTurboMode && (
+                                        <div className="p-3 bg-slate-900 text-slate-100 rounded-lg text-xs font-medium border border-slate-700 flex items-start gap-3 shadow-inner">
+                                            <AlertCircle className="h-4 w-4 shrink-0 text-slate-400 mt-0.5" />
+                                            <p className="leading-relaxed">Mode Turbo menonaktifkan jeda istirahat malam. Gunakan dengan bijak untuk meminimalisir risiko deteksi.</p>
+                                        </div>
+                                    )}
+
+                                    {!isTurboMode && (
+                                        <div className="grid grid-cols-2 gap-4 pt-4 border-t border-slate-200">
+                                            <div className="space-y-1.5">
+                                                <Label className="text-xs font-semibold text-slate-500 uppercase">Jam Aktif Mulai</Label>
+                                                <Input type="number" min="0" max="23" value={workingHourStart} onChange={(e) => setWorkingHourStart(Number(e.target.value))} className="h-9 border-slate-200 font-mono text-center" />
+                                            </div>
+                                            <div className="space-y-1.5">
+                                                <Label className="text-xs font-semibold text-slate-500 uppercase">Jam Aktif Selesai</Label>
+                                                <Input type="number" min="0" max="23" value={workingHourEnd} onChange={(e) => setWorkingHourEnd(Number(e.target.value))} className="h-9 border-slate-200 font-mono text-center" />
+                                            </div>
+                                        </div>
+                                    )}
                                 </div>
 
-                                <div className="p-4 bg-slate-50 rounded-lg border border-slate-100 flex flex-col justify-center">
-                                    <div className="text-xs text-slate-500 mb-1">Estimasi Selesai</div>
-                                    <div className="flex items-baseline gap-1">
-                                        <span className="text-2xl font-bold text-slate-900">~{estimatedTime}</span>
-                                        <span className="text-sm font-medium text-slate-500">Menit</span>
+                                <div className="grid grid-cols-2 gap-6">
+                                    <div className="space-y-3">
+                                        <Label className="text-xs font-semibold text-slate-500 uppercase tracking-wider flex items-center gap-2">
+                                            Interval Pengiriman
+                                            <ShieldAlert className="h-3 w-3 text-emerald-600" />
+                                        </Label>
+                                        <div className="flex items-center gap-2">
+                                            <div className="relative flex-1">
+                                                <Input
+                                                    type="number"
+                                                    value={delayMin}
+                                                    onChange={(e) => setDelayMin(Number(e.target.value))}
+                                                    className="pl-3 pr-8 h-10 font-mono text-sm"
+                                                />
+                                                <span className="absolute right-3 top-2.5 text-xs text-slate-400">s</span>
+                                            </div>
+                                            <span className="text-slate-400 font-medium">–</span>
+                                            <div className="relative flex-1">
+                                                <Input
+                                                    type="number"
+                                                    value={delayMax}
+                                                    onChange={(e) => setDelayMax(Number(e.target.value))}
+                                                    className="pl-3 pr-8 h-10 font-mono text-sm"
+                                                />
+                                                <span className="absolute right-3 top-2.5 text-xs text-slate-400">s</span>
+                                            </div>
+                                        </div>
+                                        <p className="text-[10px] text-slate-400">Sistem akan mengacak jeda antara {delayMin}-{delayMax} detik untuk menghindari blokir.</p>
+                                    </div>
+
+                                    <div className="p-4 bg-slate-50 rounded-lg border border-slate-100 flex flex-col justify-center">
+                                        <div className="text-xs text-slate-500 mb-1">Estimasi Selesai</div>
+                                        <div className="flex items-baseline gap-1">
+                                            <span className="text-2xl font-bold text-slate-900">~{estimatedTime}</span>
+                                            <span className="text-sm font-medium text-slate-500">Menit</span>
+                                        </div>
                                     </div>
                                 </div>
                             </div>

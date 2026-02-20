@@ -1,15 +1,48 @@
 "use client"
 
+import { useEffect, useState } from "react"
 import { useStatus } from "@/contexts/StatusContext"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Badge } from "@/components/ui/badge"
-import { User, Shield, Key, Bell, Save, CreditCard, CheckCircle2, Zap } from "lucide-react"
+import { User, Shield, Key, Bell, Save, CreditCard, CheckCircle2, Zap, AlertCircle, Loader2 } from "lucide-react"
 
 export default function SettingsPage() {
     const { user, isLoading } = useStatus()
+    const [isTurboMode, setIsTurboMode] = useState(false)
+    const [workingHourStart, setWorkingHourStart] = useState(5)
+    const [workingHourEnd, setWorkingHourEnd] = useState(23)
+    const [isSaving, setIsSaving] = useState(false)
+
+    useEffect(() => {
+        if (!isLoading) {
+            fetch('/api/settings').then(res => res.json()).then(data => {
+                if (data && !data.error) {
+                    setIsTurboMode(data.isTurboMode ?? false)
+                    setWorkingHourStart(data.workingHourStart ?? 5)
+                    setWorkingHourEnd(data.workingHourEnd ?? 23)
+                }
+            })
+        }
+    }, [isLoading])
+
+    const handleSave = async () => {
+        setIsSaving(true)
+        try {
+            await fetch('/api/settings', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ isTurboMode, workingHourStart, workingHourEnd })
+            })
+            alert('Pengaturan Global berhasil disimpan!')
+        } catch (error) {
+            alert('Gagal menyimpan pengaturan')
+        } finally {
+            setIsSaving(false)
+        }
+    }
 
     if (isLoading) {
         return (
@@ -28,8 +61,9 @@ export default function SettingsPage() {
                     <h1 className="text-2xl font-bold text-slate-900 tracking-tight">Pengaturan & Akun</h1>
                     <p className="text-slate-500 text-sm mt-1">Kelola preferensi akun, plan langganan, dan keamanan engine.</p>
                 </div>
-                <Button className="bg-slate-900 text-white hover:bg-slate-800 h-10 px-5 rounded-lg gap-2 font-bold shadow-sm transition-all text-sm">
-                    <Save className="h-4 w-4" /> Simpan Perubahan
+                <Button onClick={handleSave} disabled={isSaving} className="bg-slate-900 text-white hover:bg-slate-800 h-10 px-5 rounded-lg gap-2 font-bold shadow-sm transition-all text-sm">
+                    {isSaving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+                    Simpan Perubahan
                 </Button>
             </div>
 
@@ -118,20 +152,50 @@ export default function SettingsPage() {
                         <CardHeader className="bg-slate-50/50 pb-4 border-b border-slate-100">
                             <CardTitle className="text-base font-semibold text-slate-900 flex items-center gap-2">
                                 <Shield className="h-4 w-4 text-slate-500" />
-                                Keamanan & Delay
+                                Keamanan & Engine
                             </CardTitle>
                         </CardHeader>
                         <CardContent className="p-6 space-y-6">
-                            <div className="grid grid-cols-2 gap-4">
-                                <div className="space-y-1.5">
-                                    <Label className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Min Delay (s)</Label>
-                                    <Input type="number" defaultValue="20" className="h-10 border-slate-200 font-bold text-center" />
+                            {/* Turbo Mode Toggle */}
+                            <div className="p-4 bg-slate-50 border border-slate-200 rounded-xl space-y-4">
+                                <div className="flex items-center justify-between">
+                                    <div>
+                                        <Label className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                                            Turbo Mode
+                                            <Zap className="h-4 w-4 text-slate-500" />
+                                        </Label>
+                                        <p className="text-xs text-slate-500 mt-1">Nonaktifkan jeda istirahat malam (24/7 Engine Run).</p>
+                                    </div>
+                                    <button
+                                        type="button"
+                                        onClick={() => setIsTurboMode(!isTurboMode)}
+                                        className={`relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-slate-900 focus:ring-offset-2 ${isTurboMode ? 'bg-slate-900' : 'bg-slate-300'}`}
+                                    >
+                                        <span aria-hidden="true" className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${isTurboMode ? 'translate-x-5' : 'translate-x-0'}`} />
+                                    </button>
                                 </div>
-                                <div className="space-y-1.5">
-                                    <Label className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Max Delay (s)</Label>
-                                    <Input type="number" defaultValue="60" className="h-10 border-slate-200 font-bold text-center" />
-                                </div>
+
+                                {isTurboMode && (
+                                    <div className="p-3 bg-slate-900 text-slate-100 rounded-lg text-xs font-medium flex items-start gap-3 shadow-inner">
+                                        <AlertCircle className="h-4 w-4 shrink-0 text-slate-400 mt-0.5" />
+                                        <p className="leading-relaxed">Mode Turbo menonaktifkan jeda istirahat malam. Gunakan dengan bijak untuk meminimalisir risiko deteksi.</p>
+                                    </div>
+                                )}
+
+                                {!isTurboMode && (
+                                    <div className="grid grid-cols-2 gap-4 pt-3 border-t border-slate-200">
+                                        <div className="space-y-1.5">
+                                            <Label className="text-xs font-semibold text-slate-500 uppercase">Jam Mulai</Label>
+                                            <Input type="number" min="0" max="23" value={workingHourStart} onChange={(e) => setWorkingHourStart(Number(e.target.value))} className="h-9 border-slate-200 font-mono text-center bg-white" />
+                                        </div>
+                                        <div className="space-y-1.5">
+                                            <Label className="text-xs font-semibold text-slate-500 uppercase">Jam Selesai</Label>
+                                            <Input type="number" min="0" max="23" value={workingHourEnd} onChange={(e) => setWorkingHourEnd(Number(e.target.value))} className="h-9 border-slate-200 font-mono text-center bg-white" />
+                                        </div>
+                                    </div>
+                                )}
                             </div>
+
                             <div className="flex gap-3 bg-amber-50 p-3 rounded-lg border border-amber-100 text-xs text-amber-800">
                                 <Shield className="h-4 w-4 shrink-0 mt-0.5" />
                                 <p>Pengaturan ini menjadi default untuk setiap kampanye baru. Delay yang lebih lama mengurangi risiko blokir.</p>

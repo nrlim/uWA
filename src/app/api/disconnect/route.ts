@@ -27,7 +27,7 @@ export async function POST() {
 
         // Update instance status to signal the worker to disconnect
         const instance = await prisma.instance.findFirst({
-            where: { userId }
+            where: { users: { some: { id: userId } } }
         });
 
         if (!instance) {

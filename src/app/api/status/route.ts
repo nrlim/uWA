@@ -27,7 +27,7 @@ export async function GET() {
         }
 
         const instance = await prisma.instance.findFirst({
-            where: { userId }
+            where: { users: { some: { id: userId } } }
         });
 
         // If generic worker context, assume we just want system status

@@ -14,28 +14,33 @@ import * as path from 'path';
 const prisma = new PrismaClient();
 const MEMORY_LIMIT_MB = 1024;
 
-// Resolve owner userId for this worker instance
-let cachedWorkerId: string | null = null;
-async function getWorkerUserId(): Promise<string> {
-    if (cachedWorkerId) return cachedWorkerId;
-    // Try env var first, then fallback to first user in DB
-    if (process.env.WORKER_USER_ID) {
-        cachedWorkerId = process.env.WORKER_USER_ID;
-        return cachedWorkerId;
+let cachedPhoneNumber: string | null = null;
+async function getWorkerPhoneNumber(): Promise<string> {
+    if (cachedPhoneNumber) return cachedPhoneNumber;
+    if (process.env.WORKER_PHONE_NUMBER) {
+        cachedPhoneNumber = process.env.WORKER_PHONE_NUMBER;
+        return cachedPhoneNumber;
     }
-    const firstUser = await prisma.user.findFirst({ select: { id: true } });
-    if (!firstUser) throw new Error('No users found in database. Create a user first.');
-    const userId = firstUser.id;
-    cachedWorkerId = userId;
-    return userId;
+    const firstInstance = await prisma.instance.findFirst();
+    if (!firstInstance) throw new Error('No instances found. Provide WORKER_PHONE_NUMBER env var.');
+    cachedPhoneNumber = firstInstance.phoneNumber;
+    return cachedPhoneNumber;
 }
 
-let cachedInstanceName: string | null = null;
-async function getWorkerInstanceName(): Promise<string> {
-    if (cachedInstanceName) return cachedInstanceName;
-    const userId = await getWorkerUserId();
-    cachedInstanceName = process.env.WORKER_INSTANCE_NAME || `worker-${userId}`;
-    return cachedInstanceName;
+let cachedInstanceId: string | null = null;
+async function getWorkerInstanceId(): Promise<string> {
+    if (cachedInstanceId) return cachedInstanceId;
+    const phoneNumber = await getWorkerPhoneNumber();
+    let instance = await prisma.instance.findUnique({
+        where: { phoneNumber }
+    });
+    if (!instance) {
+        instance = await prisma.instance.create({
+            data: { phoneNumber, name: `Worker ${phoneNumber}` }
+        });
+    }
+    cachedInstanceId = instance.id;
+    return cachedInstanceId;
 }
 
 // Global Socket Reference
@@ -344,9 +349,9 @@ async function gracefulShutdown(signal: string): Promise<void> {
     await cleanupSocket(signal);
 
     try {
-        const instanceName = await getWorkerInstanceName();
+        const instanceId = await getWorkerInstanceId();
         await prisma.instance.update({
-            where: { name: instanceName },
+            where: { id: instanceId },
             data: { status: 'DISCONNECTED', qrCode: '' },
         });
     } catch { /* DB might be gone already */ }
@@ -376,7 +381,8 @@ async function connectToWhatsApp() {
     // Clean up any previous socket before creating a new one
     await cleanupSocket('reconnection');
 
-    const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
+    const phoneNumber = await getWorkerPhoneNumber();
+    const { state, saveCreds } = await useMultiFileAuthState('sessions/' + phoneNumber);
 
     const sock = makeWASocket({
         auth: state,
@@ -396,12 +402,10 @@ async function connectToWhatsApp() {
         if (qr) {
             console.log('QR Code generated');
             try {
-                const ownerId = await getWorkerUserId();
-                const instanceName = await getWorkerInstanceName();
-                await prisma.instance.upsert({
-                    where: { name: instanceName },
-                    update: { status: 'QR_READY', qrCode: qr },
-                    create: { name: instanceName, status: 'QR_READY', qrCode: qr, user: { connect: { id: ownerId } } },
+                const instanceId = await getWorkerInstanceId();
+                await prisma.instance.update({
+                    where: { id: instanceId },
+                    data: { status: 'QR_READY', qrCode: qr },
                 });
             } catch (error) {
                 console.error('Failed to save QR code to DB:', error);
@@ -417,7 +421,8 @@ async function connectToWhatsApp() {
                 console.log('Session logged out (Code 401). Clearing auth to generate new QR...');
                 const fs = await import('fs');
                 const path = await import('path');
-                const authDir = path.join(process.cwd(), 'auth_info_baileys');
+                const phoneNumber = await getWorkerPhoneNumber();
+                const authDir = path.join(process.cwd(), 'sessions', phoneNumber);
                 if (fs.existsSync(authDir)) {
                     fs.rmSync(authDir, { recursive: true, force: true });
                 }
@@ -430,9 +435,9 @@ async function connectToWhatsApp() {
             await cleanupSocket(`connection_close_${statusCode}`);
 
             try {
-                const instanceName = await getWorkerInstanceName();
+                const instanceId = await getWorkerInstanceId();
                 await prisma.instance.update({
-                    where: { name: instanceName },
+                    where: { id: instanceId },
                     data: { status: 'DISCONNECTED', qrCode: '' },
                 });
             } catch (error) {
@@ -445,8 +450,9 @@ async function connectToWhatsApp() {
                 haltReason = `Connection closed by WhatsApp (code: ${statusCode}). Possible rate-limit or ban action.`;
                 console.error(`[CRITICAL] ${haltReason}`);
 
+                const instanceId = await getWorkerInstanceId();
                 await prisma.broadcast.updateMany({
-                    where: { status: 'RUNNING', userId: await getWorkerUserId() },
+                    where: { status: 'RUNNING', instanceId },
                     data: { status: 'PAUSED_RATE_LIMIT' },
                 });
             }
@@ -468,20 +474,18 @@ async function connectToWhatsApp() {
 
             // Update instance status in DB — critical for frontend to show "CONNECTED"
             try {
-                const ownerId = await getWorkerUserId();
-                const instanceName = await getWorkerInstanceName();
-                await prisma.instance.upsert({
-                    where: { name: instanceName },
-                    update: { status: 'CONNECTED', qrCode: '' },
-                    create: { name: instanceName, status: 'CONNECTED', qrCode: '', user: { connect: { id: ownerId } } },
+                const instanceId = await getWorkerInstanceId();
+                await prisma.instance.update({
+                    where: { id: instanceId },
+                    data: { status: 'CONNECTED', qrCode: '' },
                 });
                 console.log('[DB] ✅ Instance status updated to CONNECTED.');
             } catch (err) {
                 console.error('[DB] ❌ Upsert failed, trying fallback update:', err);
                 try {
-                    const instanceName = await getWorkerInstanceName();
+                    const instanceId = await getWorkerInstanceId();
                     await prisma.instance.updateMany({
-                        where: { name: instanceName },
+                        where: { id: instanceId },
                         data: { status: 'CONNECTED', qrCode: '' },
                     });
                     console.log('[DB] ✅ Fallback update succeeded.');
@@ -492,9 +496,9 @@ async function connectToWhatsApp() {
 
             // Resume any broadcasts that were paused due to disconnection
             try {
-                const ownerId = await getWorkerUserId();
+                const instanceId = await getWorkerInstanceId();
                 const resumed = await prisma.broadcast.updateMany({
-                    where: { status: { in: ['PAUSED_RATE_LIMIT', 'PAUSED_WORKING_HOURS'] }, userId: ownerId },
+                    where: { status: { in: ['PAUSED_RATE_LIMIT', 'PAUSED_WORKING_HOURS'] }, instanceId },
                     data: { status: 'RUNNING' },
                 });
                 if (resumed.count > 0) {
@@ -639,10 +643,10 @@ async function startBroadcastProcessor() {
             }
 
             // ── Find Active Broadcast ─────────────────────────
-            const ownerId = await getWorkerUserId();
+            const instanceId = await getWorkerInstanceId();
             const broadcast = await prisma.broadcast.findFirst({
-                where: { status: { in: ['PENDING', 'RUNNING'] }, userId: ownerId },
-                orderBy: { createdAt: 'asc' },
+                where: { status: { in: ['PENDING', 'RUNNING'] }, instanceId },
+                orderBy: { updatedAt: 'asc' },
                 include: {
                     user: true, // Fetch user to check credits
                     messages: {
@@ -1093,9 +1097,9 @@ function startDisconnectWatcher(): void {
 
     disconnectWatcherInterval = setInterval(async () => {
         try {
-            const instanceName = await getWorkerInstanceName();
+            const instanceId = await getWorkerInstanceId();
             const instance = await prisma.instance.findFirst({
-                where: { name: instanceName },
+                where: { id: instanceId },
             });
 
             if (instance?.status === 'DISCONNECTING') {
@@ -1123,7 +1127,8 @@ function startDisconnectWatcher(): void {
                 // Clear the auth state so a fresh QR is generated on reconnect
                 const fs = await import('fs');
                 const path = await import('path');
-                const authDir = path.join(process.cwd(), 'auth_info_baileys');
+                const phoneNumber = await getWorkerPhoneNumber();
+                const authDir = path.join(process.cwd(), 'sessions', phoneNumber);
                 if (fs.existsSync(authDir)) {
                     fs.rmSync(authDir, { recursive: true, force: true });
                     console.log('[DISCONNECT] Auth state cleared.');
@@ -1134,9 +1139,9 @@ function startDisconnectWatcher(): void {
                 cachedImageUrl = null;
 
                 // Update DB status
-                const instanceName = await getWorkerInstanceName();
+                const instanceId = await getWorkerInstanceId();
                 await prisma.instance.update({
-                    where: { name: instanceName },
+                    where: { id: instanceId },
                     data: { status: 'DISCONNECTED', qrCode: '' },
                 });
 

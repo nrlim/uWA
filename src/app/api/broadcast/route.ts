@@ -31,11 +31,20 @@ export async function POST(req: Request) {
             dailyLimit,
             workingHourStart,
             workingHourEnd,
+            isTurboMode,
             imageUrl, // Get from request
         } = await req.json();
 
         if (!recipients || !Array.isArray(recipients) || recipients.length === 0) {
             return NextResponse.json({ error: 'Invalid recipients' }, { status: 400 });
+        }
+
+        const instance = await prisma.instance.findFirst({
+            where: { users: { some: { id: userId } } }
+        });
+
+        if (!instance) {
+            return NextResponse.json({ error: 'Tidak ada koneksi WhatsApp yang tersedia. Harap hubungkan perangkat Anda terlebih dahulu.' }, { status: 400 });
         }
 
         const broadcast = await prisma.broadcast.create({
@@ -50,7 +59,9 @@ export async function POST(req: Request) {
                 dailyLimit: dailyLimit || 0,
                 workingHourStart: workingHourStart ?? 5,
                 workingHourEnd: workingHourEnd ?? 23,
+                isTurboMode: isTurboMode ?? false,
                 user: { connect: { id: userId } }, // Link to the user
+                instance: { connect: { id: instance.id } }, // Link to the instance
                 messages: {
                     create: recipients.map((r: string) => ({
                         recipient: r,
