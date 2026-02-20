@@ -39,9 +39,8 @@ export function Sidebar({ userProfile }: { userProfile?: UserProfile | null }) {
             {/* Brand */}
             <div className="h-16 flex items-center px-6 border-b border-slate-800/50">
                 <div className="flex items-center justify-center -ml-3 -mr-2">
-                    <Image src="/images/main-logo.png" alt="uWA Logo" width={64} height={64} className="object-contain drop-shadow-md" />
+                    <Image src="/images/main-logo-v2.png" alt="uWA Logo" width={64} height={64} className="object-contain drop-shadow-md" />
                 </div>
-                <span className="font-semibold text-lg tracking-tight text-white/90">uWA</span>
             </div>
 
             {/* Navigation */}

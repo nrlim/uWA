@@ -41,9 +41,8 @@ export default function LandingPage() {
                 <div className="container mx-auto px-6 h-20 flex items-center justify-between">
                     <div className="flex items-center">
                         <div className="flex items-center justify-center -ml-4 -mr-3">
-                            <Image src="/images/main-logo.png" alt="uWA Logo" width={80} height={80} className="object-contain drop-shadow-md" />
+                            <Image src="/images/main-logo-v2.png" alt="uWA Logo" width={80} height={80} className="object-contain drop-shadow-md" />
                         </div>
-                        <span className="font-bold text-2xl tracking-tight text-slate-900">uWA</span>
                     </div>
 
                     {/* Desktop Nav */}
@@ -140,7 +139,7 @@ export default function LandingPage() {
                                     <div className="aspect-[16/10] bg-slate-950 flex text-slate-400 font-sans relative overflow-hidden">
                                         {/* Sidebar Mock */}
                                         <div className="w-16 border-r border-slate-800 bg-slate-900/50 flex flex-col items-center py-6 gap-6 z-10">
-                                            <div className="flex items-center justify-center"><Image src="/images/main-logo.png" alt="uWA Logo" width={56} height={56} className="object-contain" /></div>
+                                            <div className="flex items-center justify-center"><Image src="/images/main-logo-v2.png" alt="uWA Logo" width={56} height={56} className="object-contain" /></div>
                                             <div className="w-full h-px bg-slate-800"></div>
                                             <div className="h-8 w-8 text-slate-500 hover:text-white cursor-pointer"><LayoutDashboard className="h-5 w-5" /></div>
                                             <div className="h-8 w-8 text-slate-500 hover:text-white cursor-pointer"><Users className="h-5 w-5" /></div>
@@ -473,9 +472,8 @@ export default function LandingPage() {
                 <div className="container mx-auto px-6 flex flex-col md:flex-row items-center justify-between gap-6">
                     <div className="flex items-center">
                         <div className="flex items-center justify-center -ml-3 -mr-3">
-                            <Image src="/images/main-logo.png" alt="uWA Logo" width={64} height={64} className="object-contain drop-shadow-sm" />
+                            <Image src="/images/main-logo-v2.png" alt="uWA Logo" width={64} height={64} className="object-contain drop-shadow-sm" />
                         </div>
-                        <span className="text-slate-200 font-semibold text-lg">uWA</span>
                     </div>
 
                     <div className="text-slate-500 text-sm">

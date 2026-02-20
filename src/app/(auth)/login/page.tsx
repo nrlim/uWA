@@ -82,9 +82,8 @@ export default function LoginPage() {
                 {/* Logo */}
                 <div className="z-10 flex items-center">
                     <div className="flex items-center justify-center -ml-4 -mr-4">
-                        <Image src="/images/main-logo.png" alt="uWA Logo" width={96} height={96} className="object-contain drop-shadow-md" />
+                        <Image src="/images/main-logo-v2.png" alt="uWA Logo" width={96} height={96} className="object-contain drop-shadow-md" />
                     </div>
-                    <span className="font-bold text-2xl tracking-tight text-slate-900">uWA</span>
                 </div>
 
                 <div className="z-10 max-w-md">
