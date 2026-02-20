@@ -667,10 +667,10 @@ async function startConnectionManager(): Promise<void> {
 
     while (true) {
         try {
-            // Find all instances that are DISCONNECTED and not already in our socket pool
-            const disconnectedInstances = await prisma.instance.findMany({
+            // Find all instances that are not actively disconnecting
+            const targetInstances = await prisma.instance.findMany({
                 where: {
-                    status: 'DISCONNECTED',
+                    status: { in: ['DISCONNECTED', 'QR_READY', 'CONNECTED'] },
                     users: { some: {} } // Only instances that have at least 1 user linked
                 },
                 select: { id: true, phoneNumber: true }
@@ -680,7 +680,7 @@ async function startConnectionManager(): Promise<void> {
             const allInstances = await prisma.instance.findMany({
                 select: { id: true, status: true, phoneNumber: true }
             });
-            console.log(`[CONNECTION MANAGER] Scan: ${allInstances.length} total instances, ${disconnectedInstances.length} DISCONNECTED, ${socketPool.size} in pool`);
+            console.log(`[CONNECTION MANAGER] Scan: ${allInstances.length} total instances, ${targetInstances.length} targeted for pool connection, ${socketPool.size} currently in pool`);
             if (allInstances.length > 0) {
                 for (const inst of allInstances) {
                     const inPool = socketPool.has(inst.id) ? '✅ in pool' : '❌ not in pool';
@@ -690,7 +690,7 @@ async function startConnectionManager(): Promise<void> {
                 console.log('[CONNECTION MANAGER]   ⚠️ No instances found in database! User must visit dashboard to auto-create one.');
             }
 
-            for (const instance of disconnectedInstances) {
+            for (const instance of targetInstances) {
                 // Skip if already in pool (means socket is being set up / reconnecting)
                 if (socketPool.has(instance.id)) {
                     continue;
