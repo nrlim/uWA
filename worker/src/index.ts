@@ -1125,7 +1125,7 @@ async function processBroadcastForInstance(instanceId: string) {
                 const workStart = broadcast.workingHourStart ?? 5;
                 const workEnd = broadcast.workingHourEnd ?? 23;
 
-                if (!isWithinWorkingHours(workStart, workEnd)) {
+                if (!broadcast.isTurboMode && !isWithinWorkingHours(workStart, workEnd)) {
                     const sleepMs = msUntilWorkingHoursStart(workStart);
                     const sleepMin = Math.round(sleepMs / 60000);
 
@@ -1240,14 +1240,14 @@ async function processBroadcastForInstance(instanceId: string) {
                     const isTurbo = broadcast.isTurboMode;
 
                     // Calculate Typing Duration
-                    const baseTyping = isTurbo ? 300 : spintaxResult.length * 50;
-                    const typingMin = isTurbo ? 500 : (hasMedia ? 5000 + baseTyping : Math.max(3000, baseTyping));
-                    const typingMax = typingMin + (isTurbo ? 500 : 3000);
+                    const baseTyping = spintaxResult.length * 50;
+                    const typingMin = hasMedia ? 5000 + baseTyping : Math.max(3000, baseTyping);
+                    const typingMax = typingMin + 3000;
                     const typingDurationMs = await simulateTyping(currentEntry, jid, broadcast.id, typingMin, typingMax);
 
                     // Calculate Delay after send 
-                    const minDelay = isTurbo ? 1000 : (broadcast.delayMin || 20) * 1000;
-                    const maxDelay = isTurbo ? 2000 : (broadcast.delayMax || 60) * 1000;
+                    const minDelay = (broadcast.delayMin || 20) * 1000;
+                    const maxDelay = (broadcast.delayMax || 60) * 1000;
                     const delay = randomInt(minDelay, Math.max(minDelay, maxDelay));
 
                     // ── anti_banned_meta ──────────────────────────────
