@@ -433,7 +433,19 @@ process.on('uncaughtException', async (err) => {
  * Creates an isolated socket with its own session folder.
  * The instance must already exist in the database.
  */
+const connectingLocks = new Set<string>();
+
 async function connectInstance(instanceId: string): Promise<void> {
+    if (connectingLocks.has(instanceId)) return;
+    connectingLocks.add(instanceId);
+    try {
+        await _connectInstance(instanceId);
+    } finally {
+        connectingLocks.delete(instanceId);
+    }
+}
+
+async function _connectInstance(instanceId: string): Promise<void> {
     console.log(`[Connection] ═══════════════════════════════════════════`);
     console.log(`[Connection] Initializing session for Instance: ${instanceId}`);
     console.log(`[Connection] ═══════════════════════════════════════════`);
@@ -653,7 +665,8 @@ async function connectInstance(instanceId: string): Promise<void> {
 
             // ── TASK 1: Force Status Reset on Connection Failure BEFORE Reconnect Logic ──
             if (statusCode === 405 || isRateLimitError(lastDisconnect?.error)) {
-                console.log(`[DATABASE] 🔄 Terminal error (405/Rate-Limit) detected for ${instanceId}. Forcing DISCONNECTED status immediately.`);
+                const errLabel = statusCode === 405 ? '405 Rate-Limit/Block' : 'Rate-Limit';
+                console.log(`[SECURITY] 🛡️ ${errLabel} detected for ${instanceId}. Auto-reconnect disabled. Reverting to DISCONNECTED.`);
                 try {
                     await prisma.instance.update({
                         where: { id: instanceId },
@@ -707,23 +720,16 @@ async function connectInstance(instanceId: string): Promise<void> {
             if (statusCode === 405) {
                 failures++;
                 shouldReconnect = false;
-                console.log(`[SECURITY] 🛡️ 405 Rate-limit detected. Auto-reconnect disabled to protect IP. Manual trigger required.`);
             }
 
             // Detect rate-limit
             if (isRateLimitError(lastDisconnect?.error)) {
                 shouldReconnect = false;
                 const currentEntry = socketPool.get(instanceId);
-                let alreadyLogged = false;
 
                 if (currentEntry) {
-                    alreadyLogged = currentEntry.pauseReason === 'RATE_LIMIT_BLOCKED';
                     currentEntry.isPaused = true;
                     currentEntry.pauseReason = 'RATE_LIMIT_BLOCKED';
-                }
-
-                if (!alreadyLogged) {
-                    console.error(`[CRITICAL] 🛡️ Instance ${instanceId} is rate-limited. Reverting to DISCONNECTED.`);
                 }
 
                 await prisma.broadcast.updateMany({
@@ -863,42 +869,35 @@ async function startConnectionManager(): Promise<void> {
                 take: 5 // Process max 5 at a time to prevent CPU/IO spikes during connection bursts
             });
 
-            // Diagnostic: log scan results only when candidates found
-            if (candidates.length > 0) {
-                console.log(`[CONNECTION MANAGER] Scan: ${candidates.length} INITIALIZING candidate(s) found. Pool Size: ${socketPool.size}`);
-            }
-
+            const validCandidates = [];
             for (let i = 0; i < candidates.length; i++) {
                 const instance = candidates[i];
                 if (instance.status === 'INITIALIZING') {
                     const updatedAtTime = new Date(instance.updatedAt).getTime();
                     const ageSeconds = (Date.now() - updatedAtTime) / 1000;
 
-                    if (!socketPool.has(instance.id)) {
-                        if (ageSeconds < 30) {
-                            // Candidate is too new (still cooling/handshaking)
-                            candidates.splice(i, 1);
-                            i--;
-                            continue;
-                        } else if (ageSeconds > 120) {
+                    if (!socketPool.has(instance.id) && !connectingLocks.has(instance.id)) {
+                        if (ageSeconds > 120) {
                             console.log(`[CONNECTION MANAGER] ⏰ Instance ${instance.id} stuck in INITIALIZING for > 2m. Reverting to DISCONNECTED.`);
                             await prisma.instance.update({
                                 where: { id: instance.id },
                                 data: { status: 'DISCONNECTED' }
                             });
-                            candidates.splice(i, 1);
-                            i--; // Adjust index after splice
                             continue;
                         }
+                        validCandidates.push(instance);
                     }
                 }
             }
 
-            for (const instance of candidates) {
-                const inPool = socketPool.has(instance.id);
+            // Diagnostic: log scan results only when candidates found
+            if (validCandidates.length > 0) {
+                console.log(`[CONNECTION MANAGER] Scan: ${validCandidates.length} INITIALIZING candidate(s) found. Pool Size: ${socketPool.size}`);
+            }
 
-                // Skip if already in pool and INITIALIZING (means socket is being set up / reconnecting)
-                if (inPool) {
+            for (const instance of validCandidates) {
+                // Skip if already in pool or connecting lock
+                if (socketPool.has(instance.id) || connectingLocks.has(instance.id)) {
                     continue;
                 }
 
