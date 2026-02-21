@@ -643,12 +643,26 @@ async function connectInstance(instanceId: string): Promise<void> {
                 payloadString.includes('handshake failure');
 
             const isBadSession =
-                BAD_SESSION_CODES.includes(statusCode as number) ||
-                (statusCode as number) >= 500 ||
-                errorMessage.includes('bad session') ||
-                errorMessage.includes('connection failure') ||
-                errorMessage.includes('qr refs over limit') ||
-                hasStreamOrHandshakeError;
+                statusCode !== 405 &&
+                (BAD_SESSION_CODES.includes(statusCode as number) ||
+                    (statusCode as number) >= 500 ||
+                    errorMessage.includes('bad session') ||
+                    errorMessage.includes('connection failure') ||
+                    errorMessage.includes('qr refs over limit') ||
+                    hasStreamOrHandshakeError);
+
+            // ── TASK 1: Force Status Reset on Connection Failure BEFORE Reconnect Logic ──
+            if (statusCode === 405 || isRateLimitError(lastDisconnect?.error)) {
+                console.log(`[DATABASE] 🔄 Terminal error (405/Rate-Limit) detected for ${instanceId}. Forcing DISCONNECTED status immediately.`);
+                try {
+                    await prisma.instance.update({
+                        where: { id: instanceId },
+                        data: { status: 'DISCONNECTED', qrCode: '' },
+                    });
+                } catch (error) {
+                    console.error(`[Connection] Failed to update DISCONNECTED for ${instanceId}:`, error);
+                }
+            }
 
             if (statusCode === 515) {
                 console.log(`[CRITICAL] 🔄 WhatsApp requested restart (515). Resetting stream for ${instanceId}.`);
@@ -720,16 +734,14 @@ async function connectInstance(instanceId: string): Promise<void> {
 
             await cleanupSocketForInstance(instanceId, `connection_close_${statusCode}`);
 
-            // Force Status Reset if we disable reconnection
-            if (!shouldReconnect) {
+            // Any other terminal error that dictates no reconnect can be handled here
+            if (!shouldReconnect && statusCode !== 405 && !isRateLimitError(lastDisconnect?.error)) {
                 try {
                     await prisma.instance.update({
                         where: { id: instanceId },
                         data: { status: 'DISCONNECTED', qrCode: '' },
                     });
-                } catch (error) {
-                    console.error(`[Connection] Failed to update DISCONNECTED for ${instanceId}:`, error);
-                }
+                } catch (error) { }
             }
 
             if (shouldReconnect) {
