@@ -440,17 +440,17 @@ process.on('unhandledRejection', (reason, promise) => {
  */
 const connectingLocks = new Set<string>();
 
-async function connectInstance(instanceId: string): Promise<void> {
+async function connectInstance(instanceId: string, isReconnect: boolean = false): Promise<void> {
     if (connectingLocks.has(instanceId)) return;
     connectingLocks.add(instanceId);
     try {
-        await _connectInstance(instanceId);
+        await _connectInstance(instanceId, isReconnect);
     } finally {
         connectingLocks.delete(instanceId);
     }
 }
 
-async function _connectInstance(instanceId: string): Promise<void> {
+async function _connectInstance(instanceId: string, isReconnect: boolean = false): Promise<void> {
     console.log(`[Connection] ═══════════════════════════════════════════`);
     console.log(`[Connection] Initializing session for Instance: ${instanceId}`);
     console.log(`[Connection] ═══════════════════════════════════════════`);
@@ -463,10 +463,9 @@ async function _connectInstance(instanceId: string): Promise<void> {
         await cleanupSocketForInstance(instanceId, 'reconnection');
     }
 
-    // ── Task: Clean Initialization ──
-    // Fetch instance to check status. If INITIALIZING, wipe session for a fresh start.
+    // Fetch instance to check status. If INITIALIZING from a fresh Dashboard click, wipe session for a clean slate.
     const instance = await prisma.instance.findUnique({ where: { id: instanceId } });
-    if (instance?.status === 'INITIALIZING') {
+    if (!isReconnect && instance?.status === 'INITIALIZING') {
         console.log(`[Connection] 🆕 Status is INITIALIZING. Wiping session for ${instanceId} to ensure fresh keys.`);
         deleteSessionFolder(instanceId);
     }
@@ -785,7 +784,7 @@ async function _connectInstance(instanceId: string): Promise<void> {
 
                 console.log(`[Connection] 🔄 Reconnecting ${instanceId} in ${reconnectDelay / 1000}s...`);
                 await wait(reconnectDelay);
-                await connectInstance(instanceId);
+                await connectInstance(instanceId, true); // Flag as reconnect to preserve creds.json folder!
             }
             // If not reconnecting (rare), the connection manager will eventually pick it up
         }
