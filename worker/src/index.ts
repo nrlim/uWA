@@ -477,9 +477,10 @@ async function _connectInstance(instanceId: string): Promise<void> {
     }
 
     const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
-    // Hardcode WA version matching stream expectation
-    const version: [number, number, number] = [2, 3000, 1017531287];
-    console.log(`[Connection] Using WA v${version.join('.')} for ${instanceId}`);
+
+    // Fetch dynamic WA version from Baileys instead of hardcoding, prevents 405 Handshake rejections
+    const { version, isLatest } = await fetchLatestBaileysVersion();
+    console.log(`[Connection] Using WA v${version.join('.')} (isLatest: ${isLatest}) for ${instanceId}`);
 
     // Add random delay to prevent burst connection attempts that trigger 405
     const handshakeDelay = randomInt(2000, 5000);
@@ -487,14 +488,13 @@ async function _connectInstance(instanceId: string): Promise<void> {
     await wait(handshakeDelay);
 
     // ── Browser identity + socket options ──
-    // Use Web protocol to avoid heavy mobile history sync chunk timeouts
     const sock = makeWASocket({
         version,
         auth: state,
         logger: pino({ level: 'silent' }) as any, // Prevent verbose disk I/O and memory explosion
-        browser: ['Mac OS', 'Chrome', '121.0.0.0'],
+        browser: Browsers.macOS('Desktop'),
         mobile: false,
-        options: { headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36' } },
+
         syncFullHistory: false,
         shouldSyncHistoryMessage: () => false,
         // @ts-ignore - Aggressive Lite-Handshake to prevent memory spikes
