@@ -221,9 +221,9 @@ export default function ConnectionPage() {
                                         <QrCode className="h-8 w-8 text-blue-500 animate-pulse" />
                                     </div>
                                     <div className="space-y-2">
-                                        <h3 className="text-lg font-bold text-slate-900">Mempersiapkan QR Code</h3>
+                                        <h3 className="text-lg font-bold text-slate-900">Mensinkronisasi Sesi</h3>
                                         <p className="text-sm text-slate-500 leading-relaxed">
-                                            Sistem sedang menyiapkan sesi WhatsApp Anda. QR code akan muncul secara otomatis dalam beberapa detik...
+                                            Sistem sedang melakukan sinkronisasi aman dengan WhatsApp. Proses ini akan memakan waktu beberapa saat...
                                         </p>
                                     </div>
                                     <div className="flex justify-center pt-2">

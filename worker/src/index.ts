@@ -537,7 +537,25 @@ async function _connectInstance(instanceId: string): Promise<void> {
 
     console.log(`[Connection] Socket created for ${instanceId}. Pool size: ${socketPool.size}`);
 
-    sock.ev.on('creds.update', saveCreds);
+    sock.ev.on('creds.update', async () => {
+        saveCreds();
+
+        // ── Trigger Loading Screen immediately after QR Scan ──
+        if (sock.authState.creds.me?.id) {
+            try {
+                // If it was waiting for a QR scan, transition it back to INITIALIZING
+                // This triggers the frontend visual loading state indicating "Syncing Data"
+                // instead of showing a frozen or outdated QR code to the user.
+                const updated = await prisma.instance.updateMany({
+                    where: { id: instanceId, status: 'QR_READY' },
+                    data: { status: 'INITIALIZING', qrCode: '' },
+                });
+                if (updated.count > 0) {
+                    console.log(`[Connection] QR successfully scanned for ${instanceId}. Switching to Loading/Syncing UI.`);
+                }
+            } catch { /* ignore */ }
+        }
+    });
 
     sock.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect, qr } = update;
