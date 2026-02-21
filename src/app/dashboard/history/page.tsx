@@ -1,15 +1,19 @@
 "use client"
 
+import { useState } from "react"
 import { useStatus } from "@/contexts/StatusContext"
+import {
+    Dialog,
+    DialogContent,
+    DialogHeader,
+    DialogTitle,
+    DialogDescription,
+} from "@/components/ui/dialog"
+
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Progress } from "@/components/ui/progress"
 import {
-    CheckCircle2,
-    AlertCircle,
-    Clock,
-    ChevronRight,
-    XCircle,
     MoreHorizontal,
     Calendar,
     BarChart3,
@@ -27,7 +31,49 @@ import {
 } from "@/components/ui/dropdown-menu"
 
 export default function HistoryPage() {
-    const { recentBroadcasts, isLoading } = useStatus()
+    const { recentBroadcasts, isLoading, refresh } = useStatus()
+
+    // States for detail modal
+    const [selectedBroadcast, setSelectedBroadcast] = useState<any>(null)
+    const [isDetailOpen, setIsDetailOpen] = useState(false)
+    const [messages, setMessages] = useState<any[]>([])
+    const [loadingMessages, setLoadingMessages] = useState(false)
+
+    const handleOpenDetail = async (broadcast: any) => {
+        setSelectedBroadcast(broadcast)
+        setIsDetailOpen(true)
+
+        // Fetch Messages
+        setLoadingMessages(true)
+        try {
+            const res = await fetch(`/api/broadcast/${broadcast.id}/messages`)
+            const data = await res.json()
+            if (data.messages) setMessages(data.messages)
+        } catch (error) {
+            console.error(error)
+        } finally {
+            setLoadingMessages(false)
+        }
+
+    }
+
+    const handleDelete = async (id: string) => {
+        if (!window.confirm("Apakah Anda yakin ingin menghapus riwayat kampanye ini? Data yang dihapus tidak dapat dikembalikan.")) {
+            return
+        }
+
+        try {
+            const res = await fetch(`/api/broadcast/${id}`, { method: 'DELETE' })
+            if (res.ok) {
+                refresh()
+            } else {
+                alert("Gagal menghapus kampanye.")
+            }
+        } catch (error) {
+            console.error(error)
+            alert("Error saat menghapus kampanye.")
+        }
+    }
 
     if (isLoading) {
         return (
@@ -91,7 +137,7 @@ export default function HistoryPage() {
                                             {/* Campaign Name & ID */}
                                             <td className="px-6 py-4 align-top">
                                                 <div className="flex flex-col gap-0.5">
-                                                    <span className="font-semibold text-slate-900 text-sm group-hover:text-blue-600 transition-colors cursor-pointer">{b.name}</span>
+                                                    <span className="font-semibold text-slate-900 text-sm group-hover:text-blue-600 transition-colors cursor-pointer" onClick={() => handleOpenDetail(b)}>{b.name}</span>
                                                     <span className="text-[10px] text-slate-400 font-mono">ID: {b.id.substring(0, 8)}...</span>
                                                 </div>
                                                 {b.status === 'RUNNING' && (
@@ -162,10 +208,10 @@ export default function HistoryPage() {
                                                     <DropdownMenuContent align="end" className="w-[160px]">
                                                         <DropdownMenuLabel>Aksi</DropdownMenuLabel>
                                                         <DropdownMenuSeparator />
-                                                        <DropdownMenuItem className="cursor-pointer">
+                                                        <DropdownMenuItem className="cursor-pointer" onClick={() => handleOpenDetail(b)}>
                                                             <Eye className="mr-2 h-4 w-4" /> Detail
                                                         </DropdownMenuItem>
-                                                        <DropdownMenuItem className="cursor-pointer text-red-600 focus:text-red-600 focus:bg-red-50">
+                                                        <DropdownMenuItem className="cursor-pointer text-red-600 focus:text-red-600 focus:bg-red-50" onClick={() => handleDelete(b.id)}>
                                                             <Trash2 className="mr-2 h-4 w-4" /> Hapus
                                                         </DropdownMenuItem>
                                                     </DropdownMenuContent>
@@ -188,6 +234,84 @@ export default function HistoryPage() {
                     </div>
                 </div>
             </div>
+
+            {/* Detail Dialog */}
+            <Dialog open={isDetailOpen} onOpenChange={setIsDetailOpen}>
+                <DialogContent className="max-w-5xl max-h-[90vh] overflow-hidden flex flex-col p-0 border-none bg-slate-50 shadow-2xl">
+                    <div className="p-6 bg-white border-b border-slate-100 shrink-0">
+                        <DialogHeader>
+                            <div className="flex items-center gap-3 mb-1">
+                                <DialogTitle className="text-xl font-bold text-slate-900">
+                                    {selectedBroadcast?.name}
+                                </DialogTitle>
+                                <Badge variant="secondary" className="rounded-full text-[10px] bg-slate-100 text-slate-600 border-none">
+                                    {selectedBroadcast?.status}
+                                </Badge>
+                            </div>
+                            <DialogDescription className="text-slate-500 font-medium text-sm">
+                                ID: {selectedBroadcast?.id} • Dibuat pada {selectedBroadcast && new Date(selectedBroadcast.createdAt).toLocaleString('id-ID')}
+                            </DialogDescription>
+                        </DialogHeader>
+                    </div>
+
+                    <div className="flex-1 overflow-hidden p-6 flex flex-col">
+                        <div className="flex-1 overflow-hidden">
+                            {loadingMessages ? (
+                                <div className="flex flex-col items-center justify-center p-20 gap-3">
+                                    <div className="h-8 w-8 border-2 border-slate-200 border-t-blue-600 rounded-full animate-spin"></div>
+                                    <p className="text-slate-500 text-xs font-medium">Memuat data pesan...</p>
+                                </div>
+                            ) : (
+                                <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden h-full flex flex-col">
+                                    <div className="overflow-y-auto flex-1">
+                                        <table className="w-full text-left text-sm border-collapse">
+                                            <thead className="sticky top-0 bg-slate-50 border-b border-slate-100 z-10">
+                                                <tr>
+                                                    <th className="px-6 py-4 font-semibold text-slate-500 text-[11px] uppercase tracking-wider w-[25%]">Penerima</th>
+                                                    <th className="px-6 py-4 font-semibold text-slate-500 text-[11px] uppercase tracking-wider text-center w-[15%]">Status</th>
+                                                    <th className="px-6 py-4 font-semibold text-slate-500 text-[11px] uppercase tracking-wider w-[20%]">Waktu</th>
+                                                    <th className="px-6 py-4 font-semibold text-slate-500 text-[11px] uppercase tracking-wider w-[40%]">Keterangan</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody className="divide-y divide-slate-50">
+                                                {messages.map((msg, idx) => (
+                                                    <tr key={idx} className="hover:bg-slate-50/50 transition-colors">
+                                                        <td className="px-6 py-4 font-medium text-slate-900">{msg.recipient}</td>
+                                                        <td className="px-6 py-4 text-center">
+                                                            <Badge
+                                                                variant="secondary"
+                                                                className={`rounded-md px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide border shadow-none ${msg.status === 'SENT' ? 'bg-emerald-50 text-emerald-700 border-emerald-200' :
+                                                                    msg.status === 'FAILED' ? 'bg-red-50 text-red-700 border-red-200' :
+                                                                        'bg-slate-50 text-slate-600 border-slate-200'
+                                                                    }`}
+                                                            >
+                                                                {msg.status}
+                                                            </Badge>
+                                                        </td>
+                                                        <td className="px-6 py-4 text-slate-500 text-xs">
+                                                            {msg.sentAt ? new Date(msg.sentAt).toLocaleString('id-ID') : '-'}
+                                                        </td>
+                                                        <td className="px-6 py-4 text-slate-500 text-xs break-words font-medium">
+                                                            {msg.error || (msg.status === 'SENT' ? '✓ Pesan berhasil dikirim' : '-')}
+                                                        </td>
+                                                    </tr>
+                                                ))}
+                                                {messages.length === 0 && (
+                                                    <tr>
+                                                        <td colSpan={4} className="px-6 py-20 text-center">
+                                                            <p className="text-slate-400 text-sm">Tidak ada detail pesan.</p>
+                                                        </td>
+                                                    </tr>
+                                                )}
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+                    </div>
+                </DialogContent>
+            </Dialog>
         </div>
     )
 }
