@@ -693,34 +693,43 @@ async function connectInstance(instanceId: string): Promise<void> {
             if (statusCode === 405) {
                 failures++;
                 shouldReconnect = false;
-                console.log(`[SECURITY] �️ 405 Rate-limit detected. Auto-reconnect disabled to protect IP. Manual trigger required.`);
-            }
-
-            await cleanupSocketForInstance(instanceId, `connection_close_${statusCode}`);
-
-            try {
-                await prisma.instance.update({
-                    where: { id: instanceId },
-                    data: { status: 'DISCONNECTED', qrCode: '' },
-                });
-            } catch (error) {
-                console.error(`[Connection] Failed to update DISCONNECTED for ${instanceId}:`, error);
+                console.log(`[SECURITY] 🛡️ 405 Rate-limit detected. Auto-reconnect disabled to protect IP. Manual trigger required.`);
             }
 
             // Detect rate-limit
             if (isRateLimitError(lastDisconnect?.error)) {
+                shouldReconnect = false;
                 const currentEntry = socketPool.get(instanceId);
+                let alreadyLogged = false;
+
                 if (currentEntry) {
+                    alreadyLogged = currentEntry.pauseReason === 'RATE_LIMIT_BLOCKED';
                     currentEntry.isPaused = true;
-                    currentEntry.pauseReason = `Connection closed by WhatsApp (code: ${statusCode}). Possible rate-limit.`;
+                    currentEntry.pauseReason = 'RATE_LIMIT_BLOCKED';
                 }
-                const reason = currentEntry?.pauseReason || 'Rate-limit';
-                console.error(`[CRITICAL] ${reason}`);
+
+                if (!alreadyLogged) {
+                    console.error(`[CRITICAL] 🛡️ Instance ${instanceId} is rate-limited. Reverting to DISCONNECTED.`);
+                }
 
                 await prisma.broadcast.updateMany({
                     where: { status: 'RUNNING', instanceId },
                     data: { status: 'PAUSED_RATE_LIMIT' },
                 });
+            }
+
+            await cleanupSocketForInstance(instanceId, `connection_close_${statusCode}`);
+
+            // Force Status Reset if we disable reconnection
+            if (!shouldReconnect) {
+                try {
+                    await prisma.instance.update({
+                        where: { id: instanceId },
+                        data: { status: 'DISCONNECTED', qrCode: '' },
+                    });
+                } catch (error) {
+                    console.error(`[Connection] Failed to update DISCONNECTED for ${instanceId}:`, error);
+                }
             }
 
             if (shouldReconnect) {
@@ -852,15 +861,23 @@ async function startConnectionManager(): Promise<void> {
                 if (instance.status === 'INITIALIZING') {
                     const updatedAtTime = new Date(instance.updatedAt).getTime();
                     const ageSeconds = (Date.now() - updatedAtTime) / 1000;
-                    if (!socketPool.has(instance.id) && ageSeconds > 120) {
-                        console.log(`[CONNECTION MANAGER] ⏰ Instance ${instance.id} stuck in INITIALIZING for > 2m. Reverting to DISCONNECTED.`);
-                        await prisma.instance.update({
-                            where: { id: instance.id },
-                            data: { status: 'DISCONNECTED' }
-                        });
-                        candidates.splice(i, 1);
-                        i--; // Adjust index after splice
-                        continue;
+
+                    if (!socketPool.has(instance.id)) {
+                        if (ageSeconds < 30) {
+                            // Candidate is too new (still cooling/handshaking)
+                            candidates.splice(i, 1);
+                            i--;
+                            continue;
+                        } else if (ageSeconds > 120) {
+                            console.log(`[CONNECTION MANAGER] ⏰ Instance ${instance.id} stuck in INITIALIZING for > 2m. Reverting to DISCONNECTED.`);
+                            await prisma.instance.update({
+                                where: { id: instance.id },
+                                data: { status: 'DISCONNECTED' }
+                            });
+                            candidates.splice(i, 1);
+                            i--; // Adjust index after splice
+                            continue;
+                        }
                     }
                 }
             }
