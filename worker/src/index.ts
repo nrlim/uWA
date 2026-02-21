@@ -492,7 +492,7 @@ async function _connectInstance(instanceId: string): Promise<void> {
         version,
         auth: state,
         logger: pino({ level: 'silent' }) as any, // Prevent verbose disk I/O and memory explosion
-        browser: Browsers.macOS('Desktop'),
+        browser: ['uWA', 'Chrome', '120.0.0.0'],
         mobile: false,
 
         syncFullHistory: false,
