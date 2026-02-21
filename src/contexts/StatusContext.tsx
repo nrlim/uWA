@@ -36,6 +36,7 @@ interface StatusContextType {
     user: User | null
     isLoading: boolean
     refresh: () => void
+    totalQueueCount: number
 }
 
 const StatusContext = createContext<StatusContextType | undefined>(undefined)
@@ -46,6 +47,7 @@ export function StatusProvider({ children }: { children: React.ReactNode }) {
     const [recentBroadcasts, setRecentBroadcasts] = useState<Broadcast[]>([])
     const [user, setUser] = useState<User | null>(null)
     const [isLoading, setIsLoading] = useState(true)
+    const [totalQueueCount, setTotalQueueCount] = useState<number>(0)
 
     const fetchStatus = async () => {
         try {
@@ -56,6 +58,7 @@ export function StatusProvider({ children }: { children: React.ReactNode }) {
                 setActiveBroadcast(data.activeBroadcast)
                 setRecentBroadcasts(data.recent || [])
                 setUser(data.user || null)
+                setTotalQueueCount(data.totalQueueCount || 0)
             }
         } catch (error) {
             console.error("Failed to fetch status:", error)
@@ -71,7 +74,7 @@ export function StatusProvider({ children }: { children: React.ReactNode }) {
     }, [])
 
     return (
-        <StatusContext.Provider value={{ instance, activeBroadcast, recentBroadcasts, user, isLoading, refresh: fetchStatus }}>
+        <StatusContext.Provider value={{ instance, activeBroadcast, recentBroadcasts, user, isLoading, refresh: fetchStatus, totalQueueCount }}>
             {children}
         </StatusContext.Provider>
     )

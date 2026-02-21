@@ -424,6 +424,11 @@ process.on('uncaughtException', async (err) => {
     process.exit(1);
 });
 
+process.on('unhandledRejection', (reason, promise) => {
+    console.warn('[WARNING] Unhandled Rejection at:', promise, 'reason:', reason);
+    // Do not exit the process here to avoid dropping connections on loose socket timeouts
+});
+
 // ============================================================================
 // 12. WHATSAPP CONNECTION — Per Instance
 // ============================================================================
@@ -559,6 +564,16 @@ async function _connectInstance(instanceId: string): Promise<void> {
                     }
                 }, 90000);
             }
+
+            // Bring back the loading screen by reverting statuses to INITIALIZING during the connection handshake
+            try {
+                // If it was QR_READY, but now connecting, it means the user probably just scanned the QR code.
+                // We show INITIALIZING to indicate a loading spinner instead of sticking on the QR code screen.
+                await prisma.instance.updateMany({
+                    where: { id: instanceId, status: 'QR_READY' },
+                    data: { status: 'INITIALIZING', qrCode: '' },
+                });
+            } catch { /* ignore */ }
         }
 
         // ── QR Code Received ──────────────────────────────────
@@ -659,18 +674,11 @@ async function _connectInstance(instanceId: string): Promise<void> {
                     errorMessage.includes('bad session') ||
                     errorMessage.includes('qr refs over limit'));
 
-            // ── TASK 1: Force Status Reset on Connection Failure BEFORE Reconnect Logic ──
+            // ── TASK 1: Cooldown on Rate Limits BEFORE Reconnect Logic ──
             if (statusCode === 405 || isRateLimitError(lastDisconnect?.error)) {
                 const errLabel = statusCode === 405 ? '405 Rate-Limit/Block' : 'Rate-Limit';
-                console.log(`[SECURITY] 🛡️ ${errLabel} detected for ${instanceId}. Auto-reconnect disabled. Reverting to DISCONNECTED.`);
-                try {
-                    await prisma.instance.update({
-                        where: { id: instanceId },
-                        data: { status: 'DISCONNECTED', qrCode: '' },
-                    });
-                } catch (error) {
-                    console.error(`[Connection] Failed to update DISCONNECTED for ${instanceId}:`, error);
-                }
+                console.log(`[SECURITY] 🛡️ ${errLabel} detected for ${instanceId}. Cooldown applying. Reconnecting automatically later.`);
+                shouldReconnect = true; // Auto-reconnect enabled rather than killing the connection
             }
 
             if (statusCode === 515) {
@@ -715,13 +723,14 @@ async function _connectInstance(instanceId: string): Promise<void> {
             const trackEntry = socketPool.get(instanceId);
             let failures = trackEntry ? trackEntry.connectionFailures : 0;
             if (statusCode === 405) {
+                // We keep it alive, just register it as a soft failure so it doesn't infinite loop with no delays
                 failures++;
-                shouldReconnect = false;
             }
 
             // Detect rate-limit
             if (isRateLimitError(lastDisconnect?.error)) {
-                shouldReconnect = false;
+                // Ensure reconnect happens, but throttle it heavily
+                shouldReconnect = true;
                 const currentEntry = socketPool.get(instanceId);
 
                 if (currentEntry) {
@@ -748,7 +757,10 @@ async function _connectInstance(instanceId: string): Promise<void> {
             }
 
             if (shouldReconnect) {
-                let reconnectDelay = randomInt(3000, 10000);
+                // Wait extensively on rate limits / 405 Handshakes before hammering connection attempts
+                let reconnectDelay = (statusCode === 405 || isRateLimitError(lastDisconnect?.error))
+                    ? randomInt(25000, 45000) // 25-45s cooldown
+                    : randomInt(3000, 10000); // normal 3-10s cooldown
 
                 // Prevent connection manager interference and persist failures
                 socketPool.set(instanceId, { connectionFailures: failures } as any);
@@ -1040,7 +1052,7 @@ async function processBroadcastForInstance(instanceId: string) {
                         user: true,
                         messages: {
                             where: { status: 'PENDING' },
-                            take: 1,
+                            take: 10, // Optimize DB queries by taking a batch of 10 messages
                         },
                     },
                 });
@@ -1162,10 +1174,10 @@ async function processBroadcastForInstance(instanceId: string) {
                     continue;
                 }
 
-                // ── Get Next Message ──────────────────────────────
-                const messageTask = broadcast.messages[0];
+                // ── Process Message Batch ─────────────────────────
+                const pendingMessages = broadcast.messages;
 
-                if (!messageTask) {
+                if (pendingMessages.length === 0) {
                     const remaining = await prisma.message.count({
                         where: { broadcastId: broadcast.id, status: 'PENDING' },
                     });
@@ -1188,182 +1200,162 @@ async function processBroadcastForInstance(instanceId: string) {
                     continue;
                 }
 
-                // ── Format Recipient JID ──────────────────────────
-                let number = messageTask.recipient.trim().replace(/\D/g, '');
-                if (number.startsWith('08')) {
-                    number = '62' + number.substring(1);
-                }
-                const jid = number.includes('@s.whatsapp.net') ? number : `${number}@s.whatsapp.net`;
+                for (const messageTask of pendingMessages) {
+                    if (currentEntry.isPaused) break; // Exit chunk if paused
 
-                // ── Process Spintax ───────────────────────────────
-                const spintaxResult = processSpintax(broadcast.message);
-                await logAntiBanAction(broadcast.id, 'SPINTAX', `"${spintaxResult.substring(0, 100)}"`);
+                    // ── Format Recipient JID ──────────────────────────
+                    let number = messageTask.recipient.trim().replace(/\D/g, '');
+                    if (number.startsWith('08')) {
+                        number = '62' + number.substring(1);
+                    }
+                    const jid = number.includes('@s.whatsapp.net') ? number : `${number}@s.whatsapp.net`;
 
-                // ── Append Zero-Width Suffix ──────────────────────
-                const { result: finalContent, suffix: zwSuffix } = appendZeroWidthSuffix(spintaxResult);
-                await logAntiBanAction(broadcast.id, 'UNIQUE_SUFFIX', zwSuffix);
+                    // ── Process Spintax ───────────────────────────────
+                    const spintaxResult = processSpintax(broadcast.message);
+                    await logAntiBanAction(broadcast.id, 'SPINTAX', `"${spintaxResult.substring(0, 100)}"`);
 
-                // ── Simulate Typing ───────────────────────────────
-                const hasMedia = !!(broadcast as any).imageUrl;
-                const baseTyping = spintaxResult.length * 50; // 50ms per character
-                const typingMin = hasMedia ? 5000 + baseTyping : Math.max(3000, baseTyping);
-                const typingMax = typingMin + 3000;
-                const typingDurationMs = await simulateTyping(currentEntry, jid, broadcast.id, typingMin, typingMax);
+                    // ── Append Zero-Width Suffix ──────────────────────
+                    const { result: finalContent, suffix: zwSuffix } = appendZeroWidthSuffix(spintaxResult);
+                    await logAntiBanAction(broadcast.id, 'UNIQUE_SUFFIX', zwSuffix);
 
-                // ── Calculate Delay ───────────────────────────────
-                const minDelay = (broadcast.delayMin || 20) * 1000;
-                const maxDelay = (broadcast.delayMax || 60) * 1000;
-                const delay = randomInt(minDelay, maxDelay);
+                    // ── Simulate Typing & Delays (Respects Turbo Mode) 
+                    const hasMedia = !!(broadcast as any).imageUrl;
+                    const isTurbo = broadcast.isTurboMode;
 
-                // ── anti_banned_meta ──────────────────────────────
-                const antiBannedMeta = {
-                    spintaxVariant: spintaxResult.substring(0, 200),
-                    zwSuffix,
-                    typingDurationMs,
-                    delayAfterMs: delay,
-                    batchIndex: currentEntry.batchMessageCount + 1,
-                    dailyIndex: currentEntry.dailySentCount + 1,
-                    memoryMB: checkMemoryUsage().usedMB,
-                    timestamp: new Date().toISOString(),
-                    hasMedia,
-                    instanceId: instanceId,
-                };
+                    // Calculate Typing Duration
+                    const baseTyping = isTurbo ? 300 : spintaxResult.length * 50;
+                    const typingMin = isTurbo ? 500 : (hasMedia ? 5000 + baseTyping : Math.max(3000, baseTyping));
+                    const typingMax = typingMin + (isTurbo ? 500 : 3000);
+                    const typingDurationMs = await simulateTyping(currentEntry, jid, broadcast.id, typingMin, typingMax);
 
-                // ── Send Message ──────────────────────────────────
-                console.log(`📤 [${instanceId.slice(0, 8)}] Sending to ${jid} [batch #${antiBannedMeta.batchIndex}]${hasMedia ? ' + 🖼️' : ''}...`);
+                    // Calculate Delay after send 
+                    const minDelay = isTurbo ? 1000 : (broadcast.delayMin || 20) * 1000;
+                    const maxDelay = isTurbo ? 2000 : (broadcast.delayMax || 60) * 1000;
+                    const delay = randomInt(minDelay, Math.max(minDelay, maxDelay));
 
-                let messageStatusUpdated = false;
-                try {
-                    if (hasMedia) {
-                        const imageUrl = (broadcast as any).imageUrl;
-                        let mediaPayload: any = { url: imageUrl };
+                    // ── anti_banned_meta ──────────────────────────────
+                    const antiBannedMeta = {
+                        spintaxVariant: spintaxResult.substring(0, 200),
+                        zwSuffix,
+                        typingDurationMs,
+                        delayAfterMs: delay,
+                        batchIndex: currentEntry.batchMessageCount + 1,
+                        dailyIndex: currentEntry.dailySentCount + 1,
+                        memoryMB: checkMemoryUsage().usedMB,
+                        timestamp: new Date().toISOString(),
+                        hasMedia,
+                        instanceId: instanceId,
+                        isTurboMode: isTurbo
+                    };
 
-                        if (!currentEntry.mediaCache || currentEntry.mediaCache.broadcastId !== broadcast.id || currentEntry.mediaCache.url !== imageUrl) {
-                            console.log(`[CACHE][${instanceId}] New media for broadcast ${broadcast.id}`);
+                    // ── Send Message ──────────────────────────────────
+                    console.log(`📤 [${instanceId.slice(0, 8)}] Sending to ${jid} [batch #${antiBannedMeta.batchIndex}]${hasMedia ? ' + 🖼️' : ''} ${isTurbo ? '[⚡TURBO]' : ''}...`);
 
-                            let buffer: Buffer | null = null;
-                            if (imageUrl.startsWith('/')) {
-                                let localPath = path.join(process.cwd(), 'public', imageUrl);
-                                if (!fs.existsSync(localPath)) {
-                                    localPath = path.join(process.cwd(), '../public', imageUrl);
-                                }
-                                if (fs.existsSync(localPath)) {
-                                    buffer = fs.readFileSync(localPath);
-                                    console.log(`[MEDIA][${instanceId}] Loaded from local file:`, localPath);
-                                }
-                            } else if (imageUrl.startsWith('http')) {
-                                try {
-                                    console.log(`[MEDIA][${instanceId}] Downloading:`, imageUrl);
-                                    const res = await fetch(imageUrl);
-                                    if (res.ok) {
-                                        const arrayBuffer = await res.arrayBuffer();
-                                        buffer = Buffer.from(arrayBuffer);
-                                        console.log(`[MEDIA][${instanceId}] Cached ${buffer.length} bytes.`);
+                    let messageStatusUpdated = false;
+                    try {
+                        if (hasMedia) {
+                            const imageUrl = (broadcast as any).imageUrl;
+                            let mediaPayload: any = { url: imageUrl };
+
+                            if (!currentEntry.mediaCache || currentEntry.mediaCache.broadcastId !== broadcast.id || currentEntry.mediaCache.url !== imageUrl) {
+                                console.log(`[CACHE][${instanceId}] New media for broadcast ${broadcast.id}`);
+
+                                let buffer: Buffer | null = null;
+                                if (imageUrl.startsWith('/')) {
+                                    let localPath = path.join(process.cwd(), 'public', imageUrl);
+                                    if (!fs.existsSync(localPath)) localPath = path.join(process.cwd(), '../public', imageUrl);
+                                    if (fs.existsSync(localPath)) {
+                                        buffer = fs.readFileSync(localPath);
+                                        console.log(`[MEDIA][${instanceId}] Loaded from local file:`, localPath);
                                     }
-                                } catch (err) {
-                                    console.error(`[MEDIA][${instanceId}] Download failed:`, err);
+                                } else if (imageUrl.startsWith('http')) {
+                                    try {
+                                        console.log(`[MEDIA][${instanceId}] Downloading:`, imageUrl);
+                                        const res = await fetch(imageUrl);
+                                        if (res.ok) {
+                                            const arrayBuffer = await res.arrayBuffer();
+                                            buffer = Buffer.from(arrayBuffer);
+                                            console.log(`[MEDIA][${instanceId}] Cached ${buffer.length} bytes.`);
+                                        }
+                                    } catch (err) {
+                                        console.error(`[MEDIA][${instanceId}] Download failed:`, err);
+                                    }
                                 }
+
+                                currentEntry.mediaCache = buffer ? { broadcastId: broadcast.id, url: imageUrl, buffer } : null;
                             }
 
-                            if (buffer) {
-                                currentEntry.mediaCache = { broadcastId: broadcast.id, url: imageUrl, buffer };
-                            } else {
-                                currentEntry.mediaCache = null;
-                            }
+                            if (currentEntry.mediaCache?.buffer) mediaPayload = currentEntry.mediaCache.buffer;
+
+                            let timer: NodeJS.Timeout;
+                            const timeoutPromise = new Promise((_, reject) => {
+                                timer = setTimeout(() => reject(new Error('Send Media Timeout (60s)')), 60000);
+                            });
+
+                            const sendPromise = activeSock.sendMessage(jid, { image: mediaPayload, caption: finalContent });
+                            await Promise.race([sendPromise, timeoutPromise]).finally(() => clearTimeout(timer!));
+                        } else {
+                            let timer: NodeJS.Timeout;
+                            const timeoutPromise = new Promise((_, reject) => {
+                                timer = setTimeout(() => reject(new Error('Send Text Timeout (30s)')), 30000);
+                            });
+
+                            const sendPromise = activeSock.sendMessage(jid, { text: finalContent });
+                            await Promise.race([sendPromise, timeoutPromise]).finally(() => clearTimeout(timer!));
                         }
 
-                        if (currentEntry.mediaCache?.buffer) mediaPayload = currentEntry.mediaCache.buffer;
-
-                        const sendPromise = activeSock.sendMessage(jid, { image: mediaPayload, caption: finalContent });
-                        const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('Send Media Timeout (60s)')), 60000));
-                        await Promise.race([sendPromise, timeoutPromise]);
-                    } else {
-                        const sendPromise = activeSock.sendMessage(jid, { text: finalContent });
-                        const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('Send Text Timeout (30s)')), 30000));
-                        await Promise.race([sendPromise, timeoutPromise]);
-                    }
-
-                    await prisma.message.update({
-                        where: { id: messageTask.id },
-                        data: {
-                            status: 'SENT',
-                            sentAt: new Date(),
-                            content: spintaxResult,
-                            antiBannedMeta: antiBannedMeta as any,
-                        },
-                    });
-
-                    await prisma.broadcast.update({
-                        where: { id: broadcast.id },
-                        data: { sent: { increment: 1 } },
-                    });
-
-                    await prisma.user.update({
-                        where: { id: broadcast.userId },
-                        data: { credit: { decrement: 1 } },
-                    });
-
-                    messageStatusUpdated = true;
-                    currentEntry.dailySentCount++;
-                    console.log(`✅ [${instanceId.slice(0, 8)}] Sent. [Batch: ${currentEntry.batchMessageCount + 1}/15 | Daily: ${currentEntry.dailySentCount}/${dailyLimit || '∞'}]`);
-                } catch (err: any) {
-                    console.error(`❌ [${instanceId.slice(0, 8)}] Failed to send to ${jid}:`, err?.message || err);
-
-                    if (isRateLimitError(err)) {
-                        currentEntry.isPaused = true;
-                        currentEntry.pauseReason = `Rate-limit on send: ${err?.message || 'Unknown'}`;
-                        const reason = currentEntry.pauseReason;
-                        await logAntiBanAction(broadcast.id, 'RATE_LIMIT_PAUSE', reason);
-                        await prisma.broadcast.update({
-                            where: { id: broadcast.id },
-                            data: { status: 'PAUSED_RATE_LIMIT' },
+                        await prisma.message.update({
+                            where: { id: messageTask.id },
+                            data: { status: 'SENT', sentAt: new Date(), content: spintaxResult, antiBannedMeta: antiBannedMeta as any },
                         });
-                        console.error(`[CRITICAL][${instanceId}] 🛑 ${reason}`);
-                        messageStatusUpdated = true;
-                        continue;
-                    }
 
-                    await prisma.message.update({
-                        where: { id: messageTask.id },
-                        data: {
-                            status: 'FAILED',
-                            error: err?.message || 'Unknown Error',
-                            antiBannedMeta: antiBannedMeta as any,
-                        },
-                    });
-                    await prisma.broadcast.update({
-                        where: { id: broadcast.id },
-                        data: { failed: { increment: 1 } },
-                    });
-                    messageStatusUpdated = true;
-                } finally {
-                    if (!messageStatusUpdated) {
-                        try {
-                            console.warn(`[FAILSAFE][${instanceId}] Message ${messageTask.id} not updated. Forcing FAILED.`);
-                            await prisma.message.update({
-                                where: { id: messageTask.id },
-                                data: {
-                                    status: 'FAILED',
-                                    error: 'Unhandled Error/Timeout',
-                                    antiBannedMeta: antiBannedMeta as any,
-                                },
-                            });
-                            await prisma.broadcast.update({
-                                where: { id: broadcast.id },
-                                data: { failed: { increment: 1 } },
-                            });
-                        } catch (fatalErr) {
-                            console.error(`[FATAL][${instanceId}] Failed to update message status:`, fatalErr);
+                        await prisma.broadcast.update({ where: { id: broadcast.id }, data: { sent: { increment: 1 } } });
+                        await prisma.user.update({ where: { id: broadcast.userId }, data: { credit: { decrement: 1 } } });
+
+                        messageStatusUpdated = true;
+                        currentEntry.dailySentCount++;
+                        console.log(`✅ [${instanceId.slice(0, 8)}] Sent. [Batch: ${currentEntry.batchMessageCount + 1}/15 | Daily: ${currentEntry.dailySentCount}/${dailyLimit || '∞'}]`);
+                    } catch (err: any) {
+                        console.error(`❌ [${instanceId.slice(0, 8)}] Failed to send to ${jid}:`, err?.message || err);
+
+                        if (isRateLimitError(err)) {
+                            currentEntry.isPaused = true;
+                            currentEntry.pauseReason = `Rate-limit on send: ${err?.message || 'Unknown'}`;
+                            await logAntiBanAction(broadcast.id, 'RATE_LIMIT_PAUSE', currentEntry.pauseReason);
+                            await prisma.broadcast.update({ where: { id: broadcast.id }, data: { status: 'PAUSED_RATE_LIMIT' } });
+                            console.error(`[CRITICAL][${instanceId}] 🛑 ${currentEntry.pauseReason}`);
+                            messageStatusUpdated = true;
+                            break; // Stop inner chunk loop
+                        }
+
+                        await prisma.message.update({
+                            where: { id: messageTask.id },
+                            data: { status: 'FAILED', error: err?.message || 'Unknown Error', antiBannedMeta: antiBannedMeta as any },
+                        });
+                        await prisma.broadcast.update({ where: { id: broadcast.id }, data: { failed: { increment: 1 } } });
+                        messageStatusUpdated = true;
+                    } finally {
+                        if (!messageStatusUpdated) {
+                            try {
+                                console.warn(`[FAILSAFE][${instanceId}] Message ${messageTask.id} not updated. Forcing FAILED.`);
+                                await prisma.message.update({
+                                    where: { id: messageTask.id },
+                                    data: { status: 'FAILED', error: 'Unhandled Error/Timeout', antiBannedMeta: antiBannedMeta as any },
+                                });
+                                await prisma.broadcast.update({ where: { id: broadcast.id }, data: { failed: { increment: 1 } } });
+                            } catch (fatalErr) {
+                                console.error(`[FATAL][${instanceId}] Failed to update message status:`, fatalErr);
+                            }
                         }
                     }
+
+                    // ── Batch Cooling ─────────────────────────────────
+                    await applyBatchCoolingIfNeeded(currentEntry, broadcast.id);
+
+                    // ── Delay ─────────────────────────────────────────
+                    console.log(`⏳ [${instanceId.slice(0, 8)}] Waiting ${(delay / 1000).toFixed(1)}s...`);
+                    await wait(delay);
                 }
-
-                // ── Batch Cooling ─────────────────────────────────
-                await applyBatchCoolingIfNeeded(currentEntry, broadcast.id);
-
-                // ── Delay ─────────────────────────────────────────
-                console.log(`⏳ [${instanceId.slice(0, 8)}] Waiting ${(delay / 1000).toFixed(1)}s...`);
-                await wait(delay);
 
             } catch (e: any) {
                 console.error(`[PROCESSOR][${instanceId}] Error in loop:`, e);

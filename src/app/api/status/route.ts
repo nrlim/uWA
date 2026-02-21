@@ -92,11 +92,20 @@ export async function GET() {
             orderBy: { createdAt: 'desc' }
         });
 
+        // Accurately measure the actual queue left for the worker across ALL broadcasts
+        const totalQueueCount = await prisma.message.count({
+            where: {
+                status: 'PENDING',
+                broadcast: { userId }
+            }
+        });
+
         return NextResponse.json({
             instance,
             activeBroadcast,
             recent: recentBroadcasts,
-            user
+            user,
+            totalQueueCount
         });
     } catch (error) {
         console.error('[STATUS API] Error:', error);

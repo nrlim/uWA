@@ -39,7 +39,7 @@ function CircularProgress({ value }: { value: number }) {
 }
 
 export default function DashboardPage() {
-  const { instance, activeBroadcast, recentBroadcasts, isLoading } = useStatus()
+  const { instance, activeBroadcast, recentBroadcasts, isLoading, totalQueueCount } = useStatus()
 
   if (isLoading) {
     return (
@@ -55,7 +55,7 @@ export default function DashboardPage() {
   const totalSent = recentBroadcasts.reduce((acc, curr) => acc + curr.sent, 0) + (activeBroadcast?.sent || 0)
   const successRate = totalSent > 0 ? 98.5 : 0
   const isActive = instance?.status === "CONNECTED"
-  const queueCount = activeBroadcast ? activeBroadcast.total - activeBroadcast.sent - activeBroadcast.failed : 0
+  const queueCount = totalQueueCount
 
   return (
     <div className="space-y-8 max-w-7xl mx-auto">
@@ -168,9 +168,9 @@ export default function DashboardPage() {
               <div key={b.id} className="flex items-center justify-between px-6 py-4 hover:bg-slate-50/50 transition-colors group border-b border-slate-100 last:border-0">
                 <div className="flex items-center gap-4">
                   <div className={`h-10 w-10 rounded-full flex items-center justify-center shrink-0 border ${b.status === 'COMPLETED' ? 'bg-emerald-50 border-emerald-100 text-emerald-600' :
-                      b.status === 'FAILED' ? 'bg-red-50 border-red-100 text-red-600' :
-                        b.status === 'PAUSED_NO_CREDIT' ? 'bg-amber-50 border-amber-100 text-amber-600' :
-                          'bg-blue-50 border-blue-100 text-blue-600'
+                    b.status === 'FAILED' ? 'bg-red-50 border-red-100 text-red-600' :
+                      b.status === 'PAUSED_NO_CREDIT' ? 'bg-amber-50 border-amber-100 text-amber-600' :
+                        'bg-blue-50 border-blue-100 text-blue-600'
                     }`}>
                     {b.status === 'COMPLETED' ? <CheckCircle2 className="h-5 w-5" /> :
                       b.status === 'FAILED' ? <AlertCircle className="h-5 w-5" /> :
@@ -194,9 +194,9 @@ export default function DashboardPage() {
                   </div>
 
                   <div className={`px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wide border ${b.status === 'COMPLETED' ? 'bg-emerald-50 text-emerald-600 border-emerald-100' :
-                      b.status === 'FAILED' ? 'bg-red-50 text-red-600 border-red-100' :
-                        b.status === 'PAUSED_NO_CREDIT' ? 'bg-amber-50 text-amber-600 border-amber-100' :
-                          'bg-blue-50 text-blue-600 border-blue-100'
+                    b.status === 'FAILED' ? 'bg-red-50 text-red-600 border-red-100' :
+                      b.status === 'PAUSED_NO_CREDIT' ? 'bg-amber-50 text-amber-600 border-amber-100' :
+                        'bg-blue-50 text-blue-600 border-blue-100'
                     }`}>
                     {b.status === 'PAUSED_NO_CREDIT' ? 'JEDA (KREDIT HABIS)' : b.status}
                   </div>
