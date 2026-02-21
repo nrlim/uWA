@@ -644,9 +644,8 @@ async function _connectInstance(instanceId: string): Promise<void> {
 
             // ── Task 2: Bad session detection ──
             // These status codes indicate the session state is corrupted or rejected by WhatsApp.
-            // 401 = Unauthorized (bad creds), 408 = Request Timeout (stale session),
-            // 440 = Session replaced on another device, 500+ = server-side rejection.
-            const BAD_SESSION_CODES = [401, 408, 440];
+            // 401 = Unauthorized (bad creds), 440 = Session replaced on another device
+            const BAD_SESSION_CODES = [401, 403, 440];
             const payloadString = payload ? JSON.stringify(payload).toLowerCase() : '';
             const hasStreamOrHandshakeError =
                 errorMessage.includes('stream errored') ||
@@ -657,11 +656,8 @@ async function _connectInstance(instanceId: string): Promise<void> {
             const isBadSession =
                 statusCode !== 405 &&
                 (BAD_SESSION_CODES.includes(statusCode as number) ||
-                    (statusCode as number) >= 500 ||
                     errorMessage.includes('bad session') ||
-                    errorMessage.includes('connection failure') ||
-                    errorMessage.includes('qr refs over limit') ||
-                    hasStreamOrHandshakeError);
+                    errorMessage.includes('qr refs over limit'));
 
             // ── TASK 1: Force Status Reset on Connection Failure BEFORE Reconnect Logic ──
             if (statusCode === 405 || isRateLimitError(lastDisconnect?.error)) {
@@ -678,14 +674,15 @@ async function _connectInstance(instanceId: string): Promise<void> {
             }
 
             if (statusCode === 515) {
-                console.log(`[CRITICAL] 🔄 WhatsApp requested restart (515). Resetting stream for ${instanceId}.`);
-                deleteSessionFolder(instanceId);
+                console.log(`[CRITICAL] 🔄 WhatsApp requested restart (515). Reconnecting stream for ${instanceId}.`);
+                // CRITICAL FIX: DO NOT delete the session folder on 515!
+                // A 515 is completely standard when a device is newly linked or network bounces.
                 shouldReconnect = true;
-                await wait(5000); // Wait 5 seconds to ensure clean reconnection
+                await wait(2000);
             }
             else if (hasStreamOrHandshakeError) {
-                console.log(`[CRITICAL] Handshake rejected. Forcing session reset for ${instanceId}`);
-                deleteSessionFolder(instanceId);
+                console.log(`[CRITICAL] Stream/Handshake dropped. Reconnecting session gracefully for ${instanceId}.`);
+                // Stream drops are often purely network-based or temporary gateway checks. We should not delete auth keys here.
                 shouldReconnect = true;
             }
             // Logged out → delete session for fresh QR
