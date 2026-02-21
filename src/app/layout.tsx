@@ -23,7 +23,7 @@ export const metadata: Metadata = {
     siteName: "uWA",
     images: [
       {
-        url: "/images/thumbnail.png",
+        url: "/images/new-thumbnail-optimized.jpg",
         width: 1200,
         height: 630,
         alt: "uWA - Mesin WhatsApp Terbaik",
@@ -34,7 +34,7 @@ export const metadata: Metadata = {
     card: "summary_large_image",
     title: "uWA - Mesin WhatsApp Terbaik",
     description: "Tingkatkan komunikasi WhatsApp Anda dengan mesin 'shared connection pool' terbaik.",
-    images: ["/images/thumbnail.png"],
+    images: ["/images/new-thumbnail-optimized.jpg"],
   }
 };
 
