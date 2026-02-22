@@ -21,6 +21,7 @@ model Instance {
   qrCode      String?
   users       User[]
   broadcasts  Broadcast[]
+  createdAt   DateTime    @default(now())
   updatedAt   DateTime    @updatedAt
 }
 

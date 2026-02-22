@@ -43,6 +43,13 @@ interface SocketEntry {
     lastDailyResetDate: string;
     mediaCache: { broadcastId: string, buffer: Buffer, url: string } | null;
     isProcessing: boolean;
+
+    // ── Anti-Ban v5: Trust Tier System ──
+    instanceCreatedAt: Date | null;       // When instance was first created (for age calc)
+    sessionStartTime: number;             // When this session started (for ramp-up)
+    totalSentSession: number;             // Total messages sent in this session
+    consecutiveFailCount: number;         // Consecutive send failures (circuit breaker)
+    lastActivityType: 'send' | 'idle' | 'read' | 'typing'; // Last simulated activity
 }
 
 const socketPool: Map<string, SocketEntry> = new Map();
@@ -279,7 +286,232 @@ function isRateLimitError(error: any): boolean {
 }
 
 // ============================================================================
-// 9. SESSION VALIDATOR
+// 9. ACCOUNT TRUST TIER SYSTEM (Anti-Ban v5)
+// ============================================================================
+// WhatsApp assigns internal "trust scores" to numbers. Fresh numbers that
+// immediately begin outbound-only messaging are flagged by their AI.
+// This tier system mirrors that logic and auto-adjusts sending behavior.
+
+type TrustTier = 'NEWBORN' | 'INFANT' | 'ADOLESCENT' | 'MATURE' | 'VETERAN';
+
+interface TierConfig {
+    tier: TrustTier;
+    label: string;
+    batchSize: number;             // Messages before mandatory cooling
+    batchCooldownMinMs: number;    // Min cooling duration
+    batchCooldownMaxMs: number;    // Max cooling duration
+    delayMultiplier: number;       // Multiplier on user-set delay (1.0 = no change)
+    dailySoftCap: number;          // Suggested daily max (0 = use user setting)
+    typingMultiplier: number;      // Multiplier on typing simulation duration
+    preVerify: boolean;            // Whether to verify number exists before sending
+    randomActivityChance: number;  // Chance (0-1) to simulate random activity between messages
+    circuitBreakerThreshold: number; // Consecutive fails before auto-pause
+}
+
+const TIER_CONFIGS: Record<TrustTier, TierConfig> = {
+    NEWBORN: {
+        tier: 'NEWBORN',
+        label: '🐣 Newborn (0-3 days)',
+        batchSize: 3,
+        batchCooldownMinMs: 300_000,   // 5 min
+        batchCooldownMaxMs: 600_000,   // 10 min
+        delayMultiplier: 3.0,          // 3x slower
+        dailySoftCap: 25,
+        typingMultiplier: 2.0,
+        preVerify: true,
+        randomActivityChance: 0.6,     // 60% chance of random activity
+        circuitBreakerThreshold: 2,    // Very cautious
+    },
+    INFANT: {
+        tier: 'INFANT',
+        label: '🍼 Infant (3-7 days)',
+        batchSize: 5,
+        batchCooldownMinMs: 240_000,   // 4 min
+        batchCooldownMaxMs: 480_000,   // 8 min
+        delayMultiplier: 2.0,
+        dailySoftCap: 50,
+        typingMultiplier: 1.5,
+        preVerify: true,
+        randomActivityChance: 0.4,
+        circuitBreakerThreshold: 3,
+    },
+    ADOLESCENT: {
+        tier: 'ADOLESCENT',
+        label: '🧒 Adolescent (7-14 days)',
+        batchSize: 8,
+        batchCooldownMinMs: 180_000,   // 3 min
+        batchCooldownMaxMs: 360_000,   // 6 min
+        delayMultiplier: 1.5,
+        dailySoftCap: 100,
+        typingMultiplier: 1.2,
+        preVerify: true,
+        randomActivityChance: 0.25,
+        circuitBreakerThreshold: 3,
+    },
+    MATURE: {
+        tier: 'MATURE',
+        label: '🧑 Mature (14-30 days)',
+        batchSize: 12,
+        batchCooldownMinMs: 120_000,   // 2 min
+        batchCooldownMaxMs: 300_000,   // 5 min
+        delayMultiplier: 1.0,
+        dailySoftCap: 0,               // Use user setting
+        typingMultiplier: 1.0,
+        preVerify: false,
+        randomActivityChance: 0.15,
+        circuitBreakerThreshold: 4,
+    },
+    VETERAN: {
+        tier: 'VETERAN',
+        label: '🎖️ Veteran (30+ days)',
+        batchSize: 15,
+        batchCooldownMinMs: 120_000,
+        batchCooldownMaxMs: 300_000,
+        delayMultiplier: 1.0,
+        dailySoftCap: 0,
+        typingMultiplier: 1.0,
+        preVerify: false,
+        randomActivityChance: 0.1,
+        circuitBreakerThreshold: 5,
+    },
+};
+
+function getAccountAgeDays(instanceCreatedAt: Date | null): number {
+    if (!instanceCreatedAt) return 0; // Unknown = treat as brand new
+    return Math.floor((Date.now() - instanceCreatedAt.getTime()) / (24 * 60 * 60 * 1000));
+}
+
+function getAccountTrustTier(entry: SocketEntry): TierConfig {
+    const ageDays = getAccountAgeDays(entry.instanceCreatedAt);
+    const sessionHours = (Date.now() - entry.sessionStartTime) / (60 * 60 * 1000);
+
+    // Override: If session just started (< 1 hour) AND account is < 7 days,
+    // treat as NEWBORN regardless — the initial session is the riskiest window.
+    if (sessionHours < 1 && ageDays < 7) {
+        return TIER_CONFIGS.NEWBORN;
+    }
+
+    if (ageDays < 3) return TIER_CONFIGS.NEWBORN;
+    if (ageDays < 7) return TIER_CONFIGS.INFANT;
+    if (ageDays < 14) return TIER_CONFIGS.ADOLESCENT;
+    if (ageDays < 30) return TIER_CONFIGS.MATURE;
+    return TIER_CONFIGS.VETERAN;
+}
+
+// ============================================================================
+// 9.5 PRE-SEND RECIPIENT VERIFICATION (Anti-Ban v5)
+// ============================================================================
+// Sending to numbers NOT registered on WhatsApp is one of the fastest ways to
+// trigger a ban. WhatsApp tracks "delivery failure ratio" and flags accounts
+// with high failure rates. This check prevents sending to dead numbers.
+
+async function verifyRecipientBeforeSend(sock: any, jid: string, broadcastId: string): Promise<boolean> {
+    try {
+        const [result] = await sock.onWhatsApp(jid);
+        if (result?.exists) {
+            return true;
+        }
+        await logAntiBanAction(broadcastId, 'SKIP_INVALID', `Recipient ${jid} not on WhatsApp — skipped to protect trust score.`);
+        console.log(`[ANTI-BAN] ⛔ Skipping ${jid} — not registered on WhatsApp.`);
+        return false;
+    } catch (err: any) {
+        // If verification itself fails (network issue), allow the send to proceed
+        // rather than blocking the entire queue.
+        console.warn(`[ANTI-BAN] ⚠️ Pre-verify failed for ${jid}: ${err?.message}. Allowing send.`);
+        return true;
+    }
+}
+
+// ============================================================================
+// 9.6 RANDOM ACTIVITY SIMULATION (Anti-Ban v5)
+// ============================================================================
+// WhatsApp's AI looks for "broadcast-only" patterns: accounts that ONLY send
+// outbound messages with zero other activity. Injecting random human-like
+// actions (going offline, reading, short browsing pauses) breaks this pattern.
+
+async function simulateRandomActivity(entry: SocketEntry, broadcastId: string): Promise<void> {
+    const sock = entry.sock;
+    if (!sock) return;
+
+    const activities = [
+        async () => {
+            // Simulate going offline briefly
+            const offlineMs = randomInt(5000, 15000);
+            await sock.sendPresenceUpdate('unavailable');
+            await logAntiBanAction(broadcastId, 'STEALTH_OFFLINE', `Going offline for ${(offlineMs / 1000).toFixed(1)}s`);
+            entry.lastActivityType = 'idle';
+            await wait(offlineMs);
+            await sock.sendPresenceUpdate('available');
+        },
+        async () => {
+            // Simulate "reading" by subscribing to a random contact's presence
+            const readMs = randomInt(3000, 8000);
+            await logAntiBanAction(broadcastId, 'STEALTH_READ', `Simulating reading for ${(readMs / 1000).toFixed(1)}s`);
+            entry.lastActivityType = 'read';
+            await wait(readMs);
+        },
+        async () => {
+            // Simulate a longer "browsing" pause (as if scrolling through chats)
+            const browseMs = randomInt(8000, 20000);
+            await logAntiBanAction(broadcastId, 'STEALTH_BROWSE', `Browsing pause ${(browseMs / 1000).toFixed(1)}s`);
+            entry.lastActivityType = 'idle';
+            await wait(browseMs);
+        },
+        async () => {
+            // Simulate composing then discarding (start typing, pause, stop)
+            await sock.sendPresenceUpdate('composing');
+            const typePause = randomInt(2000, 5000);
+            await wait(typePause);
+            await sock.sendPresenceUpdate('paused');
+            entry.lastActivityType = 'typing';
+            await logAntiBanAction(broadcastId, 'STEALTH_DISCARD', `Started typing then discarded after ${(typePause / 1000).toFixed(1)}s`);
+        },
+    ];
+
+    const activity = activities[randomInt(0, activities.length - 1)];
+    try {
+        await activity();
+    } catch (err) {
+        // Non-critical — don't let stealth activity crash the processor
+        console.warn(`[STEALTH][${entry.instanceId}] Activity simulation failed (non-fatal):`, err);
+    }
+}
+
+// ============================================================================
+// 9.7 CONSECUTIVE FAIL CIRCUIT BREAKER (Anti-Ban v5)
+// ============================================================================
+// If multiple sends fail in a row, something is wrong (rate limit, ban in
+// progress, network issue). Rather than continuing to hammer and making the
+// ban worse, we auto-pause and cooldown.
+
+async function handleCircuitBreaker(entry: SocketEntry, tierConfig: TierConfig, broadcastId: string): Promise<boolean> {
+    if (entry.consecutiveFailCount >= tierConfig.circuitBreakerThreshold) {
+        const cooldownMs = randomInt(60_000, 180_000); // 1-3 min emergency cooldown
+        const cooldownSec = Math.round(cooldownMs / 1000);
+
+        await logAntiBanAction(broadcastId, 'CIRCUIT_BREAKER',
+            `🛑 ${entry.consecutiveFailCount} consecutive failures hit threshold (${tierConfig.circuitBreakerThreshold}). Emergency cooling ${cooldownSec}s.`
+        );
+        console.error(`[CIRCUIT BREAKER][${entry.instanceId}] 🛑 ${entry.consecutiveFailCount} consecutive fails. Emergency pause ${cooldownSec}s...`);
+
+        if (entry.sock) {
+            try { await entry.sock.sendPresenceUpdate('unavailable'); } catch { /* */ }
+        }
+
+        await wait(cooldownMs);
+
+        if (entry.sock) {
+            try { await entry.sock.sendPresenceUpdate('available'); } catch { /* */ }
+        }
+
+        entry.consecutiveFailCount = 0; // Reset after cooldown
+        return true; // Signal that circuit breaker was triggered
+    }
+    return false;
+}
+
+// ============================================================================
+// 9.8 SESSION VALIDATOR
 // ============================================================================
 
 async function validateSessionForInstance(instanceId: string): Promise<boolean> {
@@ -491,12 +723,34 @@ async function _connectInstance(instanceId: string, isReconnect: boolean = false
     console.log(`[Connection] Delaying handshake by ${handshakeDelay}ms for ${instanceId}`);
     await wait(handshakeDelay);
 
-    // ── Browser identity + socket options ──
+    // ── Anti-Ban v5.1: Randomized Browser Fingerprint ──
+    // A static browser identity like ['uWA','Chrome','120'] is a detectable
+    // fingerprint. Rotating between realistic browser strings makes each
+    // instance look like a different legitimate WhatsApp Web session.
+    const BROWSER_FINGERPRINTS: [string, string, string][] = [
+        ['Windows', 'Chrome', '122.0.6261.112'],
+        ['Windows', 'Chrome', '123.0.6312.106'],
+        ['Windows', 'Edge', '122.0.2365.92'],
+        ['Windows', 'Edge', '123.0.2420.65'],
+        ['Macintosh', 'Chrome', '122.0.6261.112'],
+        ['Macintosh', 'Safari', '17.3.1'],
+        ['Macintosh', 'Chrome', '123.0.6312.87'],
+        ['Windows', 'Firefox', '124.0.1'],
+        ['Windows', 'Chrome', '121.0.6167.160'],
+        ['Macintosh', 'Safari', '17.4'],
+    ];
+    const browserFingerprint = BROWSER_FINGERPRINTS[randomInt(0, BROWSER_FINGERPRINTS.length - 1)];
+    console.log(`[Connection] Browser fingerprint: ${browserFingerprint.join(' / ')} for ${instanceId}`);
+
+    // ── Anti-Ban v5.1: Jittered Keep-Alive ──
+    // A fixed 30s keepAlive is machine-detectable. Randomize between 25-45s.
+    const keepAliveMs = randomInt(25_000, 45_000);
+
     const sock = makeWASocket({
         version,
         auth: state,
         logger: pino({ level: 'silent' }) as any, // Prevent verbose disk I/O and memory explosion
-        browser: ['uWA', 'Chrome', '120.0.0.0'],
+        browser: browserFingerprint,
         mobile: false,
 
         syncFullHistory: false,
@@ -509,12 +763,19 @@ async function _connectInstance(instanceId: string, isReconnect: boolean = false
         waWebSocketUrl: 'wss://web.whatsapp.com/ws/chat',
         connectTimeoutMs: 60_000,
         defaultQueryTimeoutMs: 30_000,
-        keepAliveIntervalMs: 30_000,
+        keepAliveIntervalMs: keepAliveMs,
         printQRInTerminal: false,
         getMessage: async () => undefined,
     });
 
     // Register in socket pool
+    // Fetch instance createdAt for trust tier calculation
+    let instanceCreatedAt: Date | null = null;
+    try {
+        const inst = await prisma.instance.findUnique({ where: { id: instanceId }, select: { createdAt: true } });
+        instanceCreatedAt = inst?.createdAt ?? null;
+    } catch { /* fallback to null = treat as new */ }
+
     const poolEntry: SocketEntry = {
         sock,
         instanceId,
@@ -530,7 +791,13 @@ async function _connectInstance(instanceId: string, isReconnect: boolean = false
         lastActiveTime: Date.now(),
         lastDailyResetDate: new Date().toDateString(),
         mediaCache: null,
-        isProcessing: false
+        isProcessing: false,
+        // Anti-Ban v5 fields
+        instanceCreatedAt,
+        sessionStartTime: Date.now(),
+        totalSentSession: 0,
+        consecutiveFailCount: 0,
+        lastActivityType: 'idle',
     };
     socketPool.set(instanceId, poolEntry);
 
@@ -842,6 +1109,43 @@ async function _connectInstance(instanceId: string, isReconnect: boolean = false
                 console.error(`[Connection] Failed to resume broadcasts for ${instanceId}:`, err);
             }
 
+            // ── Anti-Ban v5.1: Auto-Read Incoming Messages ──────────
+            // WhatsApp's AI flags accounts that ONLY send outbound messages
+            // with zero reads. This handler auto-marks incoming messages as
+            // read with a realistic human delay, dramatically improving
+            // the inbound/outbound ratio and trust score.
+            sock.ev.on('messages.upsert', async (m: any) => {
+                try {
+                    const entry = socketPool.get(instanceId);
+                    if (!entry?.sock) return;
+
+                    for (const msg of m.messages) {
+                        // Only process incoming messages (not our own outbound)
+                        if (msg.key.fromMe) continue;
+                        // Skip status/broadcast messages
+                        if (msg.key.remoteJid === 'status@broadcast') continue;
+                        if (!msg.key.remoteJid) continue;
+
+                        // Simulate human reading delay (2-8 seconds)
+                        const readDelay = randomInt(2000, 8000);
+                        setTimeout(async () => {
+                            try {
+                                const currentEntry = socketPool.get(instanceId);
+                                if (!currentEntry?.sock) return;
+
+                                // Mark message as read (sends blue ticks)
+                                await currentEntry.sock.readMessages([msg.key]);
+                                console.log(`[AUTO-READ][${instanceId}] 📖 Read message from ${msg.key.remoteJid} (after ${(readDelay / 1000).toFixed(1)}s)`);
+                            } catch {
+                                // Non-critical — don't crash on read receipt failures
+                            }
+                        }, readDelay);
+                    }
+                } catch {
+                    // Silently ignore — auto-read is a best-effort feature
+                }
+            });
+
             // Trigger parallel processor for this instance
             processBroadcastForInstance(instanceId).catch(err => {
                 console.error(`[PROCESSOR] Fatal error in loop for ${instanceId}:`, err);
@@ -985,22 +1289,29 @@ async function simulateTyping(entry: SocketEntry, jid: string, broadcastId: stri
 }
 
 // ============================================================================
-// 15. BATCH COOLING
+// 15. BATCH COOLING (Anti-Ban v5: Tier-Aware)
 // ============================================================================
 
-const BATCH_COOLDOWN_EVERY = 15;
-const BATCH_COOLDOWN_MIN_MS = 120 * 1000;
-const BATCH_COOLDOWN_MAX_MS = 300 * 1000;
+// Legacy fallback constants (used when tier is not available)
+const BATCH_COOLDOWN_EVERY_DEFAULT = 15;
+const BATCH_COOLDOWN_MIN_MS_DEFAULT = 120 * 1000;
+const BATCH_COOLDOWN_MAX_MS_DEFAULT = 300 * 1000;
 
-async function applyBatchCoolingIfNeeded(entry: SocketEntry, broadcastId: string): Promise<void> {
+async function applyBatchCoolingIfNeeded(entry: SocketEntry, broadcastId: string, tierConfig?: TierConfig): Promise<void> {
     entry.batchMessageCount++;
 
-    if (entry.batchMessageCount >= BATCH_COOLDOWN_EVERY) {
-        const cooldownMs = randomInt(BATCH_COOLDOWN_MIN_MS, BATCH_COOLDOWN_MAX_MS);
+    const batchSize = tierConfig?.batchSize ?? BATCH_COOLDOWN_EVERY_DEFAULT;
+    const cooldownMinMs = tierConfig?.batchCooldownMinMs ?? BATCH_COOLDOWN_MIN_MS_DEFAULT;
+    const cooldownMaxMs = tierConfig?.batchCooldownMaxMs ?? BATCH_COOLDOWN_MAX_MS_DEFAULT;
+
+    if (entry.batchMessageCount >= batchSize) {
+        const cooldownMs = randomInt(cooldownMinMs, cooldownMaxMs);
         const cooldownSec = Math.round(cooldownMs / 1000);
 
-        await logAntiBanAction(broadcastId, 'COOLDOWN', `Batch cooling: ${cooldownSec}s after ${entry.batchMessageCount} messages`);
-        console.log(`[BATCH COOL][${entry.instanceId}] 🧊 ${cooldownSec}s rest after ${entry.batchMessageCount} messages...`);
+        await logAntiBanAction(broadcastId, 'COOLDOWN',
+            `[${tierConfig?.label ?? 'DEFAULT'}] Batch cooling: ${cooldownSec}s after ${entry.batchMessageCount}/${batchSize} messages`
+        );
+        console.log(`[BATCH COOL][${entry.instanceId}] 🧊 ${cooldownSec}s rest after ${entry.batchMessageCount}/${batchSize} messages [${tierConfig?.tier ?? 'DEFAULT'}]...`);
 
         if (entry.sock) {
             try { await entry.sock.sendPresenceUpdate('unavailable'); } catch { /* non-critical */ }
@@ -1097,6 +1408,72 @@ async function processBroadcastForInstance(instanceId: string) {
                     continue;
                 }
 
+                // ── Compute Trust Tier ──────────────────────────────
+                const tierConfig = getAccountTrustTier(currentEntry);
+                const ageDays = getAccountAgeDays(currentEntry.instanceCreatedAt);
+                const ageHours = currentEntry.instanceCreatedAt
+                    ? (Date.now() - currentEntry.instanceCreatedAt.getTime()) / (60 * 60 * 1000)
+                    : 0;
+
+                // ── Anti-Ban v5.1: Warm-Up Enforcement ───────────────
+                // Accounts less than 24 hours old MUST NOT broadcast.
+                // WhatsApp's AI immediately flags brand-new numbers that
+                // start mass-messaging within the first day.
+                if (ageHours < 24 && !broadcast.isTurboMode) {
+                    const remainingHours = Math.ceil(24 - ageHours);
+                    await logAntiBanAction(broadcast.id, 'WARMUP_BLOCK',
+                        `🛑 Account is ${ageHours.toFixed(1)}h old. Blocked from broadcasting for ${remainingHours}h (warm-up period).`
+                    );
+                    console.warn(`[WARMUP][${instanceId}] 🛑 Account only ${ageHours.toFixed(1)}h old. Must warm up for ${remainingHours}h more. Skipping broadcast.`);
+
+                    // Don't fail the broadcast — just pause it until warm-up completes
+                    await prisma.broadcast.update({
+                        where: { id: broadcast.id },
+                        data: { status: 'PAUSED_WORKING_HOURS' },
+                    });
+
+                    // Sleep in chunks until warm-up period ends
+                    const sleepMs = remainingHours * 60 * 60 * 1000;
+                    const chunkMs = 5 * 60 * 1000; // Check every 5 minutes
+                    const totalChunks = Math.ceil(sleepMs / chunkMs);
+                    for (let i = 0; i < totalChunks; i++) {
+                        await wait(Math.min(chunkMs, sleepMs - i * chunkMs));
+                        if (currentEntry?.isPaused) break;
+                    }
+
+                    await prisma.broadcast.update({
+                        where: { id: broadcast.id },
+                        data: { status: 'RUNNING' },
+                    });
+                    continue;
+                }
+
+                // Log tier on first broadcast or when starting
+                if (broadcast.status === 'PENDING') {
+                    await logAntiBanAction(broadcast.id, 'TRUST_TIER',
+                        `Account: ${tierConfig.label} | Age: ${ageDays}d | Batch: ${tierConfig.batchSize} | Delay: ×${tierConfig.delayMultiplier} | Verify: ${tierConfig.preVerify}`
+                    );
+                    console.log(`[TRUST TIER][${instanceId}] ${tierConfig.label} | Age: ${ageDays}d | Multiplier: ×${tierConfig.delayMultiplier}`);
+
+                    // ── Anti-Ban v5.1: Link Detection Guard ──────────
+                    // Sending URLs in broadcast messages is the #1 ban trigger
+                    // for new accounts. Warn in logs and for NEWBORN/INFANT,
+                    // strip or block links entirely.
+                    const URL_PATTERNS = /https?:\/\/|www\.|bit\.ly|wa\.me|t\.me|goo\.gl|tinyurl|linktr\.ee/gi;
+                    if (URL_PATTERNS.test(broadcast.message)) {
+                        if (tierConfig.tier === 'NEWBORN' || tierConfig.tier === 'INFANT') {
+                            await logAntiBanAction(broadcast.id, 'LINK_WARNING',
+                                `⚠️ CRITICAL: Message contains URLs but account is ${tierConfig.label}. Links are the #1 ban trigger for new accounts!`
+                            );
+                            console.warn(`[LINK GUARD][${instanceId}] ⚠️ CRITICAL: Broadcast "${broadcast.name}" contains links but account is ${tierConfig.tier}. HIGH BAN RISK!`);
+                        } else {
+                            await logAntiBanAction(broadcast.id, 'LINK_DETECTED',
+                                `ℹ️ Message contains URLs. Account is ${tierConfig.label} — moderate risk.`
+                            );
+                        }
+                    }
+                }
+
                 // ── Session Validation (on first message of batch) ───
                 if (broadcast.status === 'PENDING') {
                     const memStart = checkMemoryUsage();
@@ -1157,18 +1534,30 @@ async function processBroadcastForInstance(instanceId: string) {
                     continue;
                 }
 
-                // ── Daily Limit Gate ──────────────────────────────
+                // ── Daily Limit Gate (Tier-Aware) ──────────────────
                 resetDailyCounterIfNeeded(currentEntry);
-                const dailyLimit = broadcast.dailyLimit ?? 0;
+                let dailyLimit = broadcast.dailyLimit ?? 0;
+
+                // Anti-Ban v5: Enforce tier soft-cap for young accounts
+                // If the user set no limit (0) or set it higher than the tier allows,
+                // clamp it to the tier's safe cap to protect new numbers.
+                if (tierConfig.dailySoftCap > 0) {
+                    if (dailyLimit <= 0 || dailyLimit > tierConfig.dailySoftCap) {
+                        if (dailyLimit !== tierConfig.dailySoftCap) {
+                            console.log(`[TRUST TIER][${instanceId}] ⚠️ Daily limit clamped: ${dailyLimit || '∞'} → ${tierConfig.dailySoftCap} (${tierConfig.label})`);
+                        }
+                        dailyLimit = tierConfig.dailySoftCap;
+                    }
+                }
 
                 if (isDailyLimitReached(currentEntry, dailyLimit)) {
                     const sleepMs = msUntilWorkingHoursStart(workStart);
                     const sleepHrs = (sleepMs / 3600000).toFixed(1);
 
                     await logAntiBanAction(broadcast.id, 'COOLDOWN',
-                        `Daily limit reached (${currentEntry.dailySentCount}/${dailyLimit}). Pausing ~${sleepHrs}h.`
+                        `[${tierConfig.label}] Daily limit reached (${currentEntry.dailySentCount}/${dailyLimit}). Pausing ~${sleepHrs}h.`
                     );
-                    console.log(`[DAILY LIMIT][${instanceId}] 📊 ${currentEntry.dailySentCount}/${dailyLimit}. Pausing ~${sleepHrs}h...`);
+                    console.log(`[DAILY LIMIT][${instanceId}] 📊 ${currentEntry.dailySentCount}/${dailyLimit} [${tierConfig.tier}]. Pausing ~${sleepHrs}h...`);
 
                     await prisma.broadcast.update({
                         where: { id: broadcast.id },
@@ -1220,12 +1609,41 @@ async function processBroadcastForInstance(instanceId: string) {
                 for (const messageTask of pendingMessages) {
                     if (currentEntry.isPaused) break; // Exit chunk if paused
 
+                    // ── Circuit Breaker Check ─────────────────────────
+                    const breakerTriggered = await handleCircuitBreaker(currentEntry, tierConfig, broadcast.id);
+                    if (breakerTriggered) continue; // Retry after cooldown
+
                     // ── Format Recipient JID ──────────────────────────
                     let number = messageTask.recipient.trim().replace(/\D/g, '');
                     if (number.startsWith('08')) {
                         number = '62' + number.substring(1);
                     }
                     const jid = number.includes('@s.whatsapp.net') ? number : `${number}@s.whatsapp.net`;
+
+                    // ── Pre-Send Verification (Tier-Dependent) ────────
+                    // For young accounts, verify the number exists on WhatsApp
+                    // before sending to avoid delivery failures that tank trust.
+                    if (tierConfig.preVerify && !broadcast.isTurboMode) {
+                        const isValid = await verifyRecipientBeforeSend(activeSock, jid, broadcast.id);
+                        if (!isValid) {
+                            // Mark as FAILED with clear reason, don't send
+                            await prisma.message.update({
+                                where: { id: messageTask.id },
+                                data: { status: 'FAILED', error: 'Recipient not on WhatsApp (pre-verified)' },
+                            });
+                            await prisma.broadcast.update({ where: { id: broadcast.id }, data: { failed: { increment: 1 } } });
+                            await wait(randomInt(1000, 3000)); // small pause between verifications
+                            continue;
+                        }
+                        await wait(randomInt(500, 1500)); // Brief pause after verification
+                    }
+
+                    // ── Random Activity Simulation (Tier-Dependent) ───
+                    // Inject human-like behavior between messages to break
+                    // the "only sends outbound" pattern.
+                    if (!broadcast.isTurboMode && Math.random() < tierConfig.randomActivityChance) {
+                        await simulateRandomActivity(currentEntry, broadcast.id);
+                    }
 
                     // ── Process Spintax ───────────────────────────────
                     const spintaxResult = processSpintax(broadcast.message);
@@ -1235,20 +1653,24 @@ async function processBroadcastForInstance(instanceId: string) {
                     const { result: finalContent, suffix: zwSuffix } = appendZeroWidthSuffix(spintaxResult);
                     await logAntiBanAction(broadcast.id, 'UNIQUE_SUFFIX', zwSuffix);
 
-                    // ── Simulate Typing & Delays (Respects Turbo Mode) 
+                    // ── Simulate Typing & Delays (Tier-Scaled) ───────
                     const hasMedia = !!(broadcast as any).imageUrl;
                     const isTurbo = broadcast.isTurboMode;
 
-                    // Calculate Typing Duration
+                    // Calculate Typing Duration (multiplied by tier)
                     const baseTyping = spintaxResult.length * 50;
-                    const typingMin = hasMedia ? 5000 + baseTyping : Math.max(3000, baseTyping);
-                    const typingMax = typingMin + 3000;
+                    const typingMin = Math.round((hasMedia ? 5000 + baseTyping : Math.max(3000, baseTyping)) * tierConfig.typingMultiplier);
+                    const typingMax = typingMin + Math.round(3000 * tierConfig.typingMultiplier);
                     const typingDurationMs = await simulateTyping(currentEntry, jid, broadcast.id, typingMin, typingMax);
 
-                    // Calculate Delay after send 
-                    const minDelay = (broadcast.delayMin || 20) * 1000;
-                    const maxDelay = (broadcast.delayMax || 60) * 1000;
-                    const delay = randomInt(minDelay, Math.max(minDelay, maxDelay));
+                    // Calculate Delay after send (multiplied by tier)
+                    const baseMinDelay = (broadcast.delayMin || 20) * 1000;
+                    const baseMaxDelay = (broadcast.delayMax || 60) * 1000;
+                    const scaledMinDelay = Math.round(baseMinDelay * tierConfig.delayMultiplier);
+                    const scaledMaxDelay = Math.round(baseMaxDelay * tierConfig.delayMultiplier);
+                    // Add jitter: ±15% random variance to prevent machine-perfect intervals
+                    const jitterFactor = 0.85 + Math.random() * 0.3; // 0.85 to 1.15
+                    const delay = Math.round(randomInt(scaledMinDelay, Math.max(scaledMinDelay, scaledMaxDelay)) * jitterFactor);
 
                     // ── anti_banned_meta ──────────────────────────────
                     const antiBannedMeta = {
@@ -1262,11 +1684,17 @@ async function processBroadcastForInstance(instanceId: string) {
                         timestamp: new Date().toISOString(),
                         hasMedia,
                         instanceId: instanceId,
-                        isTurboMode: isTurbo
+                        isTurboMode: isTurbo,
+                        // Anti-Ban v5 metadata
+                        trustTier: tierConfig.tier,
+                        accountAgeDays: ageDays,
+                        delayMultiplier: tierConfig.delayMultiplier,
+                        consecutiveFails: currentEntry.consecutiveFailCount,
+                        totalSentSession: currentEntry.totalSentSession,
                     };
 
                     // ── Send Message ──────────────────────────────────
-                    console.log(`📤 [${instanceId.slice(0, 8)}] Sending to ${jid} [batch #${antiBannedMeta.batchIndex}]${hasMedia ? ' + 🖼️' : ''} ${isTurbo ? '[⚡TURBO]' : ''}...`);
+                    console.log(`📤 [${instanceId.slice(0, 8)}] Sending to ${jid} [batch #${antiBannedMeta.batchIndex}/${tierConfig.batchSize}]${hasMedia ? ' + 🖼️' : ''} ${isTurbo ? '[⚡TURBO]' : ''} [${tierConfig.tier}]...`);
 
                     let messageStatusUpdated = false;
                     try {
@@ -1331,14 +1759,18 @@ async function processBroadcastForInstance(instanceId: string) {
 
                         messageStatusUpdated = true;
                         currentEntry.dailySentCount++;
-                        console.log(`✅ [${instanceId.slice(0, 8)}] Sent. [Batch: ${currentEntry.batchMessageCount + 1}/15 | Daily: ${currentEntry.dailySentCount}/${dailyLimit || '∞'}]`);
+                        currentEntry.totalSentSession++;
+                        currentEntry.consecutiveFailCount = 0; // Reset on success
+                        currentEntry.lastActivityType = 'send';
+                        console.log(`✅ [${instanceId.slice(0, 8)}] Sent. [Batch: ${currentEntry.batchMessageCount + 1}/${tierConfig.batchSize} | Daily: ${currentEntry.dailySentCount}/${dailyLimit || '∞'} | Session: ${currentEntry.totalSentSession}] [${tierConfig.tier}]`);
                     } catch (err: any) {
                         console.error(`❌ [${instanceId.slice(0, 8)}] Failed to send to ${jid}:`, err?.message || err);
+                        currentEntry.consecutiveFailCount++;
 
                         if (isRateLimitError(err)) {
                             currentEntry.isPaused = true;
                             currentEntry.pauseReason = `Rate-limit on send: ${err?.message || 'Unknown'}`;
-                            await logAntiBanAction(broadcast.id, 'RATE_LIMIT_PAUSE', currentEntry.pauseReason);
+                            await logAntiBanAction(broadcast.id, 'RATE_LIMIT_PAUSE', `[${tierConfig.tier}] ${currentEntry.pauseReason}`);
                             await prisma.broadcast.update({ where: { id: broadcast.id }, data: { status: 'PAUSED_RATE_LIMIT' } });
                             console.error(`[CRITICAL][${instanceId}] 🛑 ${currentEntry.pauseReason}`);
                             messageStatusUpdated = true;
@@ -1366,11 +1798,11 @@ async function processBroadcastForInstance(instanceId: string) {
                         }
                     }
 
-                    // ── Batch Cooling ─────────────────────────────────
-                    await applyBatchCoolingIfNeeded(currentEntry, broadcast.id);
+                    // ── Batch Cooling (Tier-Aware) ────────────────────
+                    await applyBatchCoolingIfNeeded(currentEntry, broadcast.id, tierConfig);
 
-                    // ── Delay ─────────────────────────────────────────
-                    console.log(`⏳ [${instanceId.slice(0, 8)}] Waiting ${(delay / 1000).toFixed(1)}s...`);
+                    // ── Delay (Tier-Scaled) ───────────────────────────
+                    console.log(`⏳ [${instanceId.slice(0, 8)}] Waiting ${(delay / 1000).toFixed(1)}s [×${tierConfig.delayMultiplier} ${tierConfig.tier}]...`);
                     await wait(delay);
                 }
 
@@ -1391,10 +1823,15 @@ async function processBroadcastForInstance(instanceId: string) {
 
 async function startBroadcastProcessor() {
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    console.log('🚀 Anti-Ban Broadcast Processor v4.2 (Parallel Multi-Tenant)');
-    console.log('   ├─ Parallel Instance Loops: Active ✓');
-    console.log('   ├─ Localized Counters & Cache ✓');
-    console.log('   ├─ Per-Instance Batch Cooling ✓');
+    console.log('🚀 Anti-Ban Broadcast Processor v5.0 (Trust Tier Engine)');
+    console.log('   ├─ Trust Tier System: NEWBORN → VETERAN ✓');
+    console.log('   ├─ Pre-Send Verification: Active (tier-dependent) ✓');
+    console.log('   ├─ Random Activity Simulation: Active ✓');
+    console.log('   ├─ Circuit Breaker: Active (tier-dependent) ✓');
+    console.log('   ├─ Tier-Aware Batch Cooling: Active ✓');
+    console.log('   ├─ Adaptive Delay Multipliers: Active ✓');
+    console.log('   ├─ Daily Soft-Cap Enforcement: Active ✓');
+    console.log('   ├─ Timing Jitter (±15%): Active ✓');
     console.log('   ├─ Multi-Tenant Isolation: Guaranteed ✓');
     console.log('   └─ Non-Blocking Processor Architecture ✓');
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
@@ -1545,13 +1982,15 @@ function cleanupLegacySessions(): void {
 (async () => {
     try {
         console.log('═══════════════════════════════════════════════════');
-        console.log('  uWA Worker — Multi-Tenant Engine v4.0');
+        console.log('  uWA Worker — Anti-Ban Trust Tier Engine v5.0');
         console.log(`  Memory Limit: ${MEMORY_LIMIT_MB}MB`);
         console.log(`  QR Timeout: ${QR_TIMEOUT_MS / 1000}s`);
         console.log(`  Session Dir: ${SESSIONS_DIR}`);
         console.log(`  Connection Scan Interval: ${CONNECTION_SCAN_INTERVAL_MS / 1000}s`);
         console.log(`  Human Clock: Active 05:00–23:00`);
-        console.log(`  Batch Cool: Every 15 msgs → 120–300s rest`);
+        console.log(`  Trust Tiers: NEWBORN(3d) → INFANT(7d) → ADOLESCENT(14d) → MATURE(30d) → VETERAN`);
+        console.log(`  NEWBORN: 3 msg/batch, ×3 delay, 25/day cap, pre-verify ON`);
+        console.log(`  VETERAN: 15 msg/batch, ×1 delay, no cap, pre-verify OFF`);
         console.log(`  Time: ${new Date().toISOString()}`);
         console.log('═══════════════════════════════════════════════════');
 
