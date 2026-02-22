@@ -29,6 +29,12 @@ export async function GET(
 
         const { id: broadcastId } = await params;
 
+        // Parse pagination params from URL
+        const url = new URL(request.url);
+        const page = Math.max(1, parseInt(url.searchParams.get('page') || '1', 10));
+        const limit = Math.min(100, Math.max(1, parseInt(url.searchParams.get('limit') || '20', 10)));
+        const actionFilter = url.searchParams.get('action') || ''; // Optional action type filter
+
         // Verify the broadcast belongs to the user
         const broadcast = await prisma.broadcast.findFirst({
             where: {
@@ -41,16 +47,35 @@ export async function GET(
             return NextResponse.json({ error: 'Broadcast not found or access denied' }, { status: 404 });
         }
 
+        // Build where clause with optional action filter
+        const whereClause: any = { broadcastId };
+        if (actionFilter) {
+            whereClause.action = actionFilter;
+        }
+
+        // Get total count for pagination
+        const totalCount = await prisma.broadcastLog.count({ where: whereClause });
+        const totalPages = Math.ceil(totalCount / limit);
+
+        // Fetch paginated logs
         const logs = await prisma.broadcastLog.findMany({
-            where: {
-                broadcastId: broadcastId
-            },
-            orderBy: {
-                createdAt: 'desc'
-            }
+            where: whereClause,
+            orderBy: { createdAt: 'desc' },
+            skip: (page - 1) * limit,
+            take: limit,
         });
 
-        return NextResponse.json({ logs });
+        return NextResponse.json({
+            logs,
+            pagination: {
+                page,
+                limit,
+                totalCount,
+                totalPages,
+                hasNext: page < totalPages,
+                hasPrev: page > 1,
+            }
+        });
     } catch (error) {
         console.error('[LOGS API] Error fetching logs:', error);
         return NextResponse.json({ error: 'Failed to fetch logs' }, { status: 500 });
